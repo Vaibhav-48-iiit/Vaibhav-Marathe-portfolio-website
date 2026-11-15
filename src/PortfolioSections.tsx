@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { FileText, Github, Linkedin, Mail, Terminal } from 'lucide-react';
 import { SITE_CONFIG } from './config';
 import {
   getConfirmedPortfolioContent,
@@ -152,6 +153,87 @@ function SkillEntryRow({
       </div>
     </li>
   );
+}
+
+/**
+ * ConnectChannelIcon
+ * Renders a monochrome 18px inline SVG icon drawn with `currentColor` for each
+ * Connect channel row. Uses tree-shaken Lucide icons for Email, LinkedIn, GitHub,
+ * TryHackMe (terminal prompt), and Resume (PDF), and a matching 18px stroke-weight
+ * inline SVG mark for X.
+ */
+function ConnectChannelIcon({ channelId }: { channelId: string }) {
+  switch (channelId) {
+    case 'channel-email':
+      return (
+        <Mail
+          aria-hidden="true"
+          width={18}
+          height={18}
+          strokeWidth={1.75}
+          className="h-[18px] w-[18px] shrink-0"
+        />
+      );
+    case 'channel-linkedin':
+      return (
+        <Linkedin
+          aria-hidden="true"
+          width={18}
+          height={18}
+          strokeWidth={1.75}
+          className="h-[18px] w-[18px] shrink-0"
+        />
+      );
+    case 'channel-github':
+      return (
+        <Github
+          aria-hidden="true"
+          width={18}
+          height={18}
+          strokeWidth={1.75}
+          className="h-[18px] w-[18px] shrink-0"
+        />
+      );
+    case 'channel-tryhackme':
+      return (
+        <Terminal
+          aria-hidden="true"
+          width={18}
+          height={18}
+          strokeWidth={1.75}
+          className="h-[18px] w-[18px] shrink-0"
+        />
+      );
+    case 'channel-x':
+      return (
+        <svg
+          aria-hidden="true"
+          width={18}
+          height={18}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.75}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="h-[18px] w-[18px] shrink-0"
+        >
+          <path d="M4 4l11.733 16h4.267l-11.733 -16z" />
+          <path d="M4 20l6.768 -6.768m2.46 -2.46l6.772 -6.772" />
+        </svg>
+      );
+    case 'channel-resume':
+    default:
+      return (
+        <FileText
+          aria-hidden="true"
+          width={18}
+          height={18}
+          strokeWidth={1.75}
+          className="h-[18px] w-[18px] shrink-0"
+        />
+      );
+  }
 }
 
 /**
@@ -761,24 +843,44 @@ export function PortfolioSections({
               data-testid="connect-channels-list"
               className="divide-y divide-[#262C36] border-t border-b border-[#262C36] font-data-mono text-xs sm:text-sm"
             >
-              {content.connect.channels.map((channel) => (
-                <li
-                  key={channel.id}
-                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-x-4 gap-y-1 py-2.5 min-h-[48px]"
-                >
-                  <span className="sm:w-32 shrink-0 text-xs text-[#9A968E]">
-                    {channel.label}
-                  </span>
+              {content.connect.channels.map((channel) => {
+                const colorTransitionClass = reducedMotion
+                  ? 'transition-none'
+                  : 'transition-colors duration-150 motion-reduce:transition-none';
 
-                  <div className="flex flex-1 flex-wrap items-center justify-between gap-2 sm:gap-3">
+                return (
+                  <li
+                    key={channel.id}
+                    className="flex items-end sm:items-center justify-between gap-x-2 sm:gap-x-4 py-2 min-h-[48px]"
+                  >
                     <a
                       href={channel.href}
                       target={channel.external ? '_blank' : undefined}
                       rel={channel.external ? 'noopener noreferrer' : undefined}
-                      className="inline-flex min-h-[44px] items-center py-1 break-all sm:break-normal text-[#E8E4DA] underline decoration-[#262C36] underline-offset-4 transition-colors hover:text-[#4FD1D9] hover:decoration-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9]"
+                      className="group flex min-w-0 flex-1 flex-col sm:flex-row sm:items-center sm:justify-start gap-x-4 gap-y-1 py-1 min-h-[44px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9]"
                     >
-                      {channel.value}
-                      {channel.external ? ' ↗' : ''}
+                      <span className="inline-flex sm:w-40 shrink-0 items-center text-xs whitespace-nowrap">
+                        <span
+                          data-connect-icon={channel.id}
+                          className={`inline-flex w-7 shrink-0 items-center justify-start text-[#9A968E] group-hover:text-[#4FD1D9] group-focus-visible:text-[#4FD1D9] group-focus:text-[#4FD1D9] ${colorTransitionClass}`}
+                        >
+                          <ConnectChannelIcon channelId={channel.id} />
+                        </span>
+                        <span
+                          data-connect-label={channel.id}
+                          className="text-[#9A968E]"
+                        >
+                          {channel.label}
+                        </span>
+                      </span>
+
+                      <span
+                        data-connect-value={channel.id}
+                        className={`inline-flex items-center py-0.5 whitespace-nowrap text-[#E8E4DA] underline decoration-[#262C36] underline-offset-4 group-hover:text-[#4FD1D9] group-hover:decoration-[#4FD1D9] group-focus-visible:text-[#4FD1D9] group-focus-visible:decoration-[#4FD1D9] group-focus:text-[#4FD1D9] group-focus:decoration-[#4FD1D9] ${colorTransitionClass}`}
+                      >
+                        {channel.value}
+                        {channel.external ? ' ↗' : ''}
+                      </span>
                     </a>
 
                     {channel.copyValue && (
@@ -786,16 +888,16 @@ export function PortfolioSections({
                         type="button"
                         data-testid="copy-email-button"
                         onClick={() => handleCopyEmail(channel.copyValue)}
-                        className="cursor-pointer min-h-[44px] min-w-[44px] rounded border border-[#262C36] bg-[#0B0D10] px-3.5 py-1.5 text-xs text-[#E8E4DA] transition-colors hover:border-[#4FD1D9] hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9]"
+                        className={`shrink-0 cursor-pointer min-h-[44px] min-w-[44px] rounded border border-[#262C36] bg-[#0B0D10] px-3.5 py-1.5 text-xs text-[#E8E4DA] hover:border-[#4FD1D9] hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] ${colorTransitionClass}`}
                       >
                         {emailCopied
                           ? content.connect.copiedConfirmationLabel
                           : content.connect.copyEmailLabel}
                       </button>
                     )}
-                  </div>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ul>
           </RevealBlock>
         </div>
