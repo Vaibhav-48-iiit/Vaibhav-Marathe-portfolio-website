@@ -1,0 +1,133 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-primary: #0B0D10;
+    --text-primary: #E8E4DA;
+    --accent-cyan: #4FD1D9;
+    --accent-amber: #E8A33D;
+    --scrollbar-track: #1A1D22;
+    --scrollbar-thumb: #3A3F47;
+    --font-display: 'Instrument Serif', Georgia, serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  html {
+    background-color: #0B0D10;
+    color: #E8E4DA;
+    font-family: var(--font-mono);
+    scroll-behavior: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #3A3F47 #1A1D22;
+  }
+
+  body {
+    background-color: #0B0D10;
+    color: #E8E4DA;
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+  }
+
+  /* Thin dark scrollbar in Chrome, Edge, Safari, and Firefox */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #3A3F47 #1A1D22;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #1A1D22;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: #3A3F47;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: #4FD1D9;
+  }
+
+  /* Visible cyan focus rings on every interactive element */
+  a:focus-visible,
+  button:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid #4FD1D9;
+    outline-offset: 2px;
+  }
+}
+
+/* Lenis smooth scrolling structural rules */
+html.lenis,
+html.lenis body {
+  height: auto;
+}
+
+.lenis.lenis-smooth {
+  scroll-behavior: auto !important;
+}
+
+.lenis.lenis-smooth [data-lenis-prevent] {
+  overscroll-behavior: contain;
+}
+
+.font-display-serif {
+  font-family: var(--font-display);
+}
+
+.font-data-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Print-friendly styles for write-up reading pages */
+@media print {
+  html,
+  body {
+    background: #ffffff !important;
+    color: #111111 !important;
+    font-size: 11pt;
+  }
+
+  header,
+  nav[aria-label="Mobile sections navigation"],
+  [data-testid="delta-canvas-container"],
+  [data-static-backdrop="true"],
+  .no-print {
+    display: none !important;
+  }
+
+  main,
+  article,
+  section {
+    background: transparent !important;
+    color: #111111 !important;
+    border-color: #cccccc !important;
+  }
+
+  pre,
+  code,
+  figure,
+  blockquote {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  pre {
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+    border: 1px solid #cccccc !important;
+    background: #f7f7f7 !important;
+    color: #111111 !important;
+  }
+
+  a {
+    color: #111111 !important;
+    text-decoration: underline !important;
+  }
+}
