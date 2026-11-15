@@ -25,26 +25,22 @@
  * A. TODO FIELDS (Render nothing if empty or prefixed with "TODO"):
  *  1. links.resume ("/Vaibhav_Marathe_Resume.pdf")
  *     -> TODO: confirm the PDF file exists in /public/Vaibhav_Marathe_Resume.pdf
- *  2. background.introDraft
- *     -> DRAFT, replace with my own words
- *  3. background.changelog[1].date ("")
+ *  2. background.changelog[1].date ("")
  *     -> TODO date: when C++/Python/MERN/DSA to cybersecurity pivot happened
- *  4. background.changelog[1].text
+ *  3. background.changelog[1].text
  *     -> TODO: replace with my own wording
- *  5. background.changelog[2].date ("")
+ *  4. background.changelog[2].date ("")
  *     -> TODO date: when TryHackMe Pre Security / Web Hacking / Mr Robot CTF completed
- *  6. projectsAndCtfs.built[0] ("DEXA AI").status ("")
+ *  5. projectsAndCtfs.built[0] ("DEXA AI").status ("")
  *     -> TODO: confirm whether status is "completed" or "in progress"
- *  7. projectsAndCtfs.built[2] ("Decentralized Maritime Communication Network").status ("")
+ *  6. projectsAndCtfs.built[2] ("Decentralized Maritime Communication Network").status ("")
  *     -> TODO: confirm status & whether project should be shown
- *  8. writeups.entries[0] ("mr-robot").date ("")
+ *  7. writeups.entries[0] ("mr-robot").date ("")
  *     -> TODO: add completion date for Mr Robot CTF
- *  9. writeups.entries[0] ("mr-robot").sections (goal, setup, reconnaissance,
+ *  8. writeups.entries[0] ("mr-robot").sections (goal, setup, reconnaissance,
  *     enumeration, foothold, privilegeEscalation, whatIGotWrong,
  *     defendersView, takeaways)
  *     -> TODO: my own notes (currently empty; published: false by default)
- * 10. connect.introLine ("TODO: my own wording about internships and what I'm looking for.")
- *     -> TODO: replace with my own wording about internships and what I'm looking for
  *
  * B. UNPUBLISHED WRITE-UPS (`published: false` — hidden from published list):
  *  1. writeups.entries[0] ("mr-robot" — "Mr Robot CTF") (published: false)
@@ -81,9 +77,8 @@ export const PORTFOLIO_CONTENT = {
   },
 
   background: {
-    // DRAFT, replace with my own words
     introDraft:
-      "I'm a Computer Science student at IIIT Surat who started in software engineering and full-stack development before shifting my focus to cybersecurity and ethical hacking. My development background helps me understand how web applications are structured, how client-server communication flows, and where weaknesses tend to appear.",
+      "I'm a Computer Science student at IIIT Surat. I started in software development with React, Node.js and MongoDB, then moved to security because I want to work on the offensive side. I'm learning penetration testing and web application testing through TryHackMe and PortSwigger's Web Security Academy, and I've completed Pre Security, Cyber Security 101 and the Mr Robot CTF. Right now I'm working through the Junior Penetration Tester path and learning Burp Suite.",
     taglinePullQuote:
       'Understanding systems. Finding weaknesses. Building better security.',
     statusLine: 'Open to internships, Summer 2027 · Surat, India',

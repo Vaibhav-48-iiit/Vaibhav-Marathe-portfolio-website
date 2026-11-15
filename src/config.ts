@@ -75,9 +75,8 @@ export const SITE_CONFIG = {
 
   // Background config fields (referenced alongside src/content.js)
   backgroundConfig: {
-    // DRAFT, replace with my own words
     introText:
-      "I'm a Computer Science student at IIIT Surat who started in software engineering and full-stack development before shifting my focus to cybersecurity and ethical hacking. My development background helps me understand how web applications are structured, how client-server communication flows, and where weaknesses tend to appear.",
+      "I'm a Computer Science student at IIIT Surat. I started in software development with React, Node.js and MongoDB, then moved to security because I want to work on the offensive side. I'm learning penetration testing and web application testing through TryHackMe and PortSwigger's Web Security Academy, and I've completed Pre Security, Cyber Security 101 and the Mr Robot CTF. Right now I'm working through the Junior Penetration Tester path and learning Burp Suite.",
     tagline: 'Understanding systems. Finding weaknesses. Building better security.',
   },
 
@@ -85,7 +84,8 @@ export const SITE_CONFIG = {
   connectConfig: {
     amberStatusLabel: 'ACCESS GRANTED',
     heading: 'Connect',
-    introLine: "TODO: my own wording about internships and what I'm looking for.",
+    introLine:
+      "I'm looking for penetration testing, VAPT and web application security internships, in India or remote. Email is the quickest way to reach me.",
     statusLine: 'Open to internships, Summer 2027 · Surat, India',
     copyEmailLabel: 'Copy email',
     copiedConfirmationLabel: 'copied',
@@ -188,6 +188,9 @@ export const SITE_CONFIG = {
     firstVisitDurationMs: 8000,
     // Repeat visit terminal intro duration in milliseconds (~2 seconds total)
     repeatVisitDurationMs: 2000,
+    // Hard failsafe timeouts so the intro is guaranteed to end even if timers are interrupted
+    firstVisitFailsafeMs: 10000,
+    repeatVisitFailsafeMs: 3000,
     // Delay after the final line before clearing the terminal and resolving the hero
     clearHoldMs: 550,
     // LocalStorage key used to detect repeat visits

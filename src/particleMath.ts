@@ -51,6 +51,83 @@ export interface ScrollMetrics {
   ambientFieldVisibility: number;
 }
 
+// Module-level session state so re-renders can never reset intro completion
+let sessionIntroFinished = false;
+let sessionIntroMountCount = 0;
+
+/**
+ * Returns true if the terminal intro has already finished (or been skipped) in this session.
+ */
+export function isIntroFinishedInSession(): boolean {
+  return sessionIntroFinished;
+}
+
+/**
+ * Marks the terminal intro as finished in this session and records the visit in localStorage.
+ * Idempotent: returns true only on the first call that transitions from false -> true.
+ */
+export function markIntroFinishedInSession(
+  storage: Pick<Storage, 'setItem'> | null | undefined = typeof window !== 'undefined'
+    ? window.localStorage
+    : null,
+): boolean {
+  if (sessionIntroFinished) return false;
+  sessionIntroFinished = true;
+  markVisited(storage);
+  return true;
+}
+
+/**
+ * Increments and returns the number of times `<TerminalIntro />` has mounted in this session.
+ * Used by the `?debug=1` diagnostics overlay.
+ */
+export function incrementIntroMountCount(): number {
+  sessionIntroMountCount += 1;
+  return sessionIntroMountCount;
+}
+
+/**
+ * Returns the current number of times `<TerminalIntro />` has mounted in this session.
+ */
+export function getIntroMountCount(): number {
+  return sessionIntroMountCount;
+}
+
+/**
+ * Resets the module-level intro session flags (for unit tests only).
+ */
+export function resetIntroSessionStateForTests(): void {
+  sessionIntroFinished = false;
+  sessionIntroMountCount = 0;
+}
+
+/**
+ * Determines whether the terminal intro should be skipped immediately on load:
+ * - Already finished in this session
+ * - URL has `?intro=0` or `?autostart=1`
+ * - Initial route is under `/writeups`
+ * - `prefers-reduced-motion` is enabled or `Plain view` / `saveData` is active
+ */
+export function shouldSkipIntroOnLoad(options: {
+  pathname: string;
+  search: string;
+  prefersReducedMotion: boolean;
+  plainView: boolean;
+}): boolean {
+  if (sessionIntroFinished) return true;
+  if (options.pathname.startsWith(SITE_CONFIG.routing.writeupsBasePath)) {
+    return true;
+  }
+  const params = new URLSearchParams(options.search);
+  if (params.get('intro') === '0' || params.get('autostart') === '1') {
+    return true;
+  }
+  if (options.prefersReducedMotion || options.plainView) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * Safely checks whether the visitor has completed the intro before.
  * Wrapped in try/catch so private browsing, sandboxed iframes, or disabled

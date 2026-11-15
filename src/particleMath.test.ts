@@ -16,6 +16,12 @@ import {
   markVisited,
   getInitialPlainView,
   savePlainViewPreference,
+  isIntroFinishedInSession,
+  markIntroFinishedInSession,
+  incrementIntroMountCount,
+  getIntroMountCount,
+  resetIntroSessionStateForTests,
+  shouldSkipIntroOnLoad,
 } from './particleMath';
 import { buildWriteupHref, resolveRoute } from './router';
 import {
@@ -35,18 +41,98 @@ import {
 import { SITE_CONFIG } from './config';
 import { PORTFOLIO_CONTENT } from './content.js';
 
-test('Phase 6: quality tiers, pixel-ratio caps, saveData Plain view default, TODO stripping, and published-only write-up links', () => {
-  // 1. Data file keeps TODO string, but rendered content strips it completely
-  assert.ok(
-    PORTFOLIO_CONTENT.connect.introLine.startsWith('TODO:'),
-    'Data file must retain the TODO string for future editing',
+test('Intro stability: ?intro=0 skips immediately, session completion is idempotent, mount counter increments once, and failsafe timings are configured', () => {
+  resetIntroSessionStateForTests();
+
+  // 1. Failsafe timings: 10s on first visit, 3s on repeat visit
+  assert.equal(SITE_CONFIG.timings.firstVisitFailsafeMs, 10000);
+  assert.equal(SITE_CONFIG.timings.repeatVisitFailsafeMs, 3000);
+
+  // 2. Normal first load at / does not skip
+  assert.equal(
+    shouldSkipIntroOnLoad({
+      pathname: '/',
+      search: '',
+      prefersReducedMotion: false,
+      plainView: false,
+    }),
+    false,
   );
+  assert.equal(
+    shouldSkipIntroOnLoad({
+      pathname: '/',
+      search: '?debug=1',
+      prefersReducedMotion: false,
+      plainView: false,
+    }),
+    false,
+  );
+
+  // 3. ?intro=0 skips immediately
+  assert.equal(
+    shouldSkipIntroOnLoad({
+      pathname: '/',
+      search: '?intro=0',
+      prefersReducedMotion: false,
+      plainView: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldSkipIntroOnLoad({
+      pathname: '/',
+      search: '?intro=0&debug=1',
+      prefersReducedMotion: false,
+      plainView: false,
+    }),
+    true,
+  );
+
+  // 4. Mount counter increments once per mount
+  assert.equal(getIntroMountCount(), 0);
+  assert.equal(incrementIntroMountCount(), 1);
+  assert.equal(getIntroMountCount(), 1);
+
+  // 5. Session completion flag is set once and cannot be reset by re-renders
+  const store = new Map<string, string>();
+  const mockStorage = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      store.set(k, v);
+    },
+  };
+  assert.equal(isIntroFinishedInSession(), false);
+  assert.equal(markIntroFinishedInSession(mockStorage), true);
+  assert.equal(isIntroFinishedInSession(), true);
+  assert.equal(hasVisitedBefore(mockStorage), true);
+  // Second call returns false (idempotent)
+  assert.equal(markIntroFinishedInSession(mockStorage), false);
+  // Once finished in session, shouldSkipIntroOnLoad is always true
+  assert.equal(
+    shouldSkipIntroOnLoad({
+      pathname: '/',
+      search: '',
+      prefersReducedMotion: false,
+      plainView: false,
+    }),
+    true,
+  );
+
+  resetIntroSessionStateForTests();
+});
+
+test('Phase 6: quality tiers, pixel-ratio caps, saveData Plain view default, TODO stripping, and published-only write-up links', () => {
+  // 1. Updated background intro and connect intro lines render in full, while TODO strings remain stripped
   const defaultContent = getConfirmedPortfolioContent('');
   assert.equal(
-    defaultContent.connect.introLine,
-    '',
-    'Rendered connect.introLine must be empty when data value starts with TODO',
+    defaultContent.background.introDraft,
+    "I'm a Computer Science student at IIIT Surat. I started in software development with React, Node.js and MongoDB, then moved to security because I want to work on the offensive side. I'm learning penetration testing and web application testing through TryHackMe and PortSwigger's Web Security Academy, and I've completed Pre Security, Cyber Security 101 and the Mr Robot CTF. Right now I'm working through the Junior Penetration Tester path and learning Burp Suite.",
   );
+  assert.equal(
+    defaultContent.connect.introLine,
+    "I'm looking for penetration testing, VAPT and web application security internships, in India or remote. Email is the quickest way to reach me.",
+  );
+  assert.equal(isRenderableText('TODO: placeholder'), false);
 
   // 2. Links to a write-up page (e.g. Mr Robot in Broken lane) render ONLY when published:true
   const defaultMrRobotLab = defaultContent.projectsAndCtfs.broken.find(
@@ -169,8 +255,7 @@ test('Phase 5: Lenis config, Connect section channels, hero labels, and sound st
   assert.equal(content.connect.heading, 'Connect');
   assert.equal(
     content.connect.introLine,
-    '',
-    'TODO intro line must be sanitized to empty string in rendered content',
+    "I'm looking for penetration testing, VAPT and web application security internships, in India or remote. Email is the quickest way to reach me.",
   );
   assert.equal(
     content.connect.statusLine,

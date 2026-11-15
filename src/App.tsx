@@ -18,12 +18,15 @@ import { SITE_CONFIG, type SectionId } from './config';
 import {
   computeScrollMetrics,
   getInitialPlainView,
+  getIntroMountCount,
   hasVisitedBefore,
+  isIntroFinishedInSession,
   isSaveDataEnabled,
-  markVisited,
+  markIntroFinishedInSession,
   resolveQualityTierProfile,
   resolveStartingQualityTier,
   savePlainViewPreference,
+  shouldSkipIntroOnLoad,
   type ScrollMetrics,
 } from './particleMath';
 import { isRenderableText } from './contentFilter';
@@ -71,7 +74,8 @@ function usePrefersReducedMotion(): boolean {
 }
 
 /**
- * HomeView renders the 6-section portfolio at `/`.
+ * HomeView (defined at module level so it never remounts on parent render)
+ * Renders the 6-section portfolio at `/`.
  * Shows hero text (name, tagline, nav) immediately as HTML with no blank screen,
  * and lazy-loads the Three.js scene after first paint.
  */
@@ -83,6 +87,7 @@ function HomeView({
   soundMuted,
   scrollMetricsRef,
   onIntroComplete,
+  onIntroMountDiagnostic,
   onScrollToTop,
   onDebugStatsChange,
 }: {
@@ -93,6 +98,7 @@ function HomeView({
   soundMuted: boolean;
   scrollMetricsRef: MutableRefObject<ScrollMetrics>;
   onIntroComplete: () => void;
+  onIntroMountDiagnostic: (mounts: number) => void;
   onScrollToTop: () => void;
   onDebugStatsChange: (stats: SceneDebugStats) => void;
 }) {
@@ -132,6 +138,7 @@ function HomeView({
           isRepeatVisit={isRepeatVisit}
           soundMuted={soundMuted}
           onComplete={onIntroComplete}
+          onMountDiagnostic={onIntroMountDiagnostic}
         />
       )}
 
@@ -214,6 +221,10 @@ function AppShell() {
   const location = useLocation();
   const currentRoute = resolveRoute(location.pathname);
 
+  // Track how many times the app root renders for the ?debug=1 diagnostics overlay
+  const rootRenderCountRef = useRef<number>(0);
+  rootRenderCountRef.current += 1;
+
   // Detect repeat visit via localStorage (wrapped in try/catch inside hasVisitedBefore)
   const [isRepeatVisit] = useState<boolean>(() => hasVisitedBefore());
 
@@ -233,36 +244,59 @@ function AppShell() {
     getInitialSoundMuted(),
   );
 
-  // Skip intro immediately if prefers-reduced-motion is enabled, saveData/Plain view is active,
-  // ?autostart=1 is present, or initial entry is on a /writeups route.
+  // Skip intro immediately if ?intro=0, ?autostart=1, prefers-reduced-motion, saveData/Plain view,
+  // or initial entry is on a /writeups route. Stored in both a ref/module flag and a single state flip.
+  const introFinishedRef = useRef<boolean>(isIntroFinishedInSession());
   const [introComplete, setIntroComplete] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
-    if (window.location.pathname.startsWith(SITE_CONFIG.routing.writeupsBasePath)) {
-      markVisited();
-      return true;
-    }
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('autostart') === '1') {
-      markVisited();
-      return true;
-    }
-    const rm = Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
-    if (rm || getInitialPlainView(rm, window.localStorage, isSaveDataEnabled())) {
-      markVisited();
+    const rm = Boolean(
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
+    );
+    const pv = getInitialPlainView(rm, window.localStorage, isSaveDataEnabled());
+    const skip = shouldSkipIntroOnLoad({
+      pathname: window.location.pathname,
+      search: window.location.search,
+      prefersReducedMotion: rm,
+      plainView: pv,
+    });
+    if (skip) {
+      introFinishedRef.current = true;
+      markIntroFinishedInSession();
       return true;
     }
     return false;
   });
 
+  // Direct DOM refs for the ?debug=1 overlay so 0.5s FPS samples never trigger React re-renders
+  const appRootRef = useRef<HTMLDivElement | null>(null);
+
+  // Stable callback with empty dependency array — flips intro state at most once per session
+  const handleIntroComplete = useCallback(() => {
+    if (introFinishedRef.current) return;
+    introFinishedRef.current = true;
+    markIntroFinishedInSession();
+    if (appRootRef.current) {
+      appRootRef.current.setAttribute('data-intro-state', 'resolved');
+    }
+    setIntroComplete(true);
+  }, []);
+
   const [pageProgress, setPageProgress] = useState<number>(0);
   const [activeSection, setActiveSection] = useState<SectionId>('home');
-  const [lenisActive, setLenisActive] = useState<boolean>(false);
 
-  // Debug stats state for `?debug=1` overlay
-  const [debugStats, setDebugStats] = useState<SceneDebugStats>(() => {
+  const lastPageProgressRef = useRef<number>(0);
+  const lastActiveSectionRef = useRef<SectionId>('home');
+
+  const lenisActive = !(reducedMotion || plainView);
+
+  // Keep FPS, tier, particle counts, and DPR in refs — NEVER in React state that re-renders AppShell
+  const debugStatsRef = useRef<SceneDebugStats>((() => {
     const w = typeof window !== 'undefined' ? window.innerWidth : 1280;
     const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-    const nav = typeof navigator !== 'undefined' ? (navigator as Navigator & { deviceMemory?: number }) : undefined;
+    const nav =
+      typeof navigator !== 'undefined'
+        ? (navigator as Navigator & { deviceMemory?: number })
+        : undefined;
     const startTier = resolveStartingQualityTier({
       viewportWidth: w,
       hardwareConcurrency: nav?.hardwareConcurrency,
@@ -280,7 +314,77 @@ function AppShell() {
       ambientParticleCount: prof.ambientField ? prof.ambientParticleCount : 0,
       pixelRatio: prof.pixelRatio,
     };
-  });
+  })());
+
+  // Direct DOM refs for the ?debug=1 overlay so 0.5s FPS samples never trigger React re-renders
+  const debugTierSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugFpsSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugParticlesSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugParticlesSubSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugDprSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugLenisSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugIntroMountsSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugRootRendersSpanRef = useRef<HTMLSpanElement | null>(null);
+
+  const plainViewRef = useRef<boolean>(plainView);
+  plainViewRef.current = plainView;
+
+  const syncDebugHudDom = useCallback(() => {
+    const stats = debugStatsRef.current;
+    const isPlain = plainViewRef.current;
+    const tierLabel = isPlain ? 'plain' : stats.tier;
+    const totalParticles = isPlain
+      ? 0
+      : stats.particleCount + stats.ambientParticleCount;
+
+    if (appRootRef.current) {
+      appRootRef.current.setAttribute('data-quality-tier', tierLabel);
+    }
+    if (debugTierSpanRef.current) {
+      debugTierSpanRef.current.textContent = tierLabel;
+    }
+    if (debugFpsSpanRef.current) {
+      debugFpsSpanRef.current.textContent = String(isPlain ? 0 : stats.fps);
+    }
+    if (debugParticlesSpanRef.current) {
+      debugParticlesSpanRef.current.textContent = String(totalParticles);
+    }
+    if (debugParticlesSubSpanRef.current) {
+      debugParticlesSubSpanRef.current.textContent = isPlain
+        ? ''
+        : ` (${stats.particleCount}+${stats.ambientParticleCount})`;
+    }
+    if (debugDprSpanRef.current) {
+      debugDprSpanRef.current.textContent = String(
+        isPlain ? 1 : stats.pixelRatio,
+      );
+    }
+    if (debugIntroMountsSpanRef.current) {
+      debugIntroMountsSpanRef.current.textContent = String(getIntroMountCount());
+    }
+    if (debugRootRendersSpanRef.current) {
+      debugRootRendersSpanRef.current.textContent = String(
+        rootRenderCountRef.current,
+      );
+    }
+  }, []);
+
+  const handleDebugStatsChange = useCallback(
+    (stats: SceneDebugStats) => {
+      debugStatsRef.current = stats;
+      syncDebugHudDom();
+    },
+    [syncDebugHudDom],
+  );
+
+  const handleIntroMountDiagnostic = useCallback(
+    (mounts: number) => {
+      if (debugIntroMountsSpanRef.current) {
+        debugIntroMountsSpanRef.current.textContent = String(mounts);
+      }
+    },
+    [],
+  );
 
   const isDebugOverlayEnabled =
     new URLSearchParams(location.search).get('debug') === '1';
@@ -294,7 +398,8 @@ function AppShell() {
     }),
   );
 
-  // Single source of truth updater for both the 3D scene and the "depth %" HUD
+  // Single source of truth updater for both the 3D scene and the "depth %" HUD.
+  // Only updates React state when the rounded percentage or activeSection actually changes.
   const applyScrollPosition = useCallback(
     (scrollPx: number) => {
       if (typeof window === 'undefined') return;
@@ -310,10 +415,17 @@ function AppShell() {
       });
 
       scrollMetricsRef.current = metrics;
-      setPageProgress(Math.round(metrics.pageProgress * 100) / 100);
+      const nextRoundedProgress = Math.round(metrics.pageProgress * 100) / 100;
+      if (nextRoundedProgress !== lastPageProgressRef.current) {
+        lastPageProgressRef.current = nextRoundedProgress;
+        setPageProgress(nextRoundedProgress);
+      }
 
       if (currentRoute.kind !== 'portfolio') {
-        setActiveSection('writeups');
+        if (lastActiveSectionRef.current !== 'writeups') {
+          lastActiveSectionRef.current = 'writeups';
+          setActiveSection('writeups');
+        }
         return;
       }
 
@@ -333,7 +445,11 @@ function AppShell() {
           currentId = sec.id;
         }
       }
-      setActiveSection(currentId);
+
+      if (currentId !== lastActiveSectionRef.current) {
+        lastActiveSectionRef.current = currentId;
+        setActiveSection(currentId);
+      }
     },
     [currentRoute.kind],
   );
@@ -346,7 +462,6 @@ function AppShell() {
     const disableLenis = reducedMotion || plainView;
     if (disableLenis) {
       lenisRef.current = null;
-      setLenisActive(false);
 
       const onNativeScroll = () => {
         applyScrollPosition(
@@ -370,7 +485,6 @@ function AppShell() {
       autoRaf: false,
     });
     lenisRef.current = lenis;
-    setLenisActive(true);
 
     // Expose scroll metrics strictly from Lenis's scroll event
     lenis.on('scroll', (instance: Lenis) => {
@@ -422,7 +536,6 @@ function AppShell() {
       if (lenisRef.current === lenis) {
         lenisRef.current = null;
       }
-      setLenisActive(false);
     };
   }, [reducedMotion, plainView, applyScrollPosition]);
 
@@ -492,24 +605,31 @@ function AppShell() {
     scrollToTarget(0, { immediate: true, offset: 0 });
   }, [location.pathname, location.hash, currentRoute.kind, scrollToTarget]);
 
-  // If user navigates to a write-up page, mark intro as complete so returning to `/` is seamless
+  // If user navigates to a write-up page or has ?intro=0, mark intro as complete so returning to `/` is seamless
   useEffect(() => {
-    if (currentRoute.kind !== 'portfolio' && !introComplete) {
-      markVisited();
-      setIntroComplete(true);
+    const params = new URLSearchParams(location.search);
+    if (
+      (currentRoute.kind !== 'portfolio' || params.get('intro') === '0') &&
+      !introComplete
+    ) {
+      handleIntroComplete();
     }
-  }, [currentRoute.kind, introComplete]);
+  }, [currentRoute.kind, location.search, introComplete, handleIntroComplete]);
 
   // If prefers-reduced-motion becomes true dynamically, skip intro and enable Plain view
   useEffect(() => {
     if (reducedMotion) {
       if (!introComplete) {
-        markVisited();
-        setIntroComplete(true);
+        handleIntroComplete();
       }
       setPlainView(true);
     }
-  }, [reducedMotion, introComplete]);
+  }, [reducedMotion, introComplete, handleIntroComplete]);
+
+  // Keep debug HUD DOM synced whenever plainView or route changes
+  useEffect(() => {
+    syncDebugHudDom();
+  }, [plainView, isDebugOverlayEnabled, syncDebugHudDom]);
 
   const handleTogglePlainView = useCallback(() => {
     setPlainView((prev) => {
@@ -536,6 +656,7 @@ function AppShell() {
           offset: SITE_CONFIG.lenis.headerOffsetPx,
         });
       }
+      lastActiveSectionRef.current = id;
       setActiveSection(id);
     },
     [scrollToTarget],
@@ -543,16 +664,19 @@ function AppShell() {
 
   const handleScrollToTop = useCallback(() => {
     scrollToTarget(0, { offset: 0 });
+    lastActiveSectionRef.current = 'home';
     setActiveSection('home');
   }, [scrollToTarget]);
 
-  const currentTierLabel = plainView ? 'plain' : debugStats.tier;
+  const initialStats = debugStatsRef.current;
+  const currentTierLabel = plainView ? 'plain' : initialStats.tier;
   const currentParticleTotal = plainView
     ? 0
-    : debugStats.particleCount + debugStats.ambientParticleCount;
+    : initialStats.particleCount + initialStats.ambientParticleCount;
 
   return (
     <div
+      ref={appRootRef}
       data-intro-state={introComplete ? 'resolved' : 'intro'}
       data-plain-view={plainView ? 'true' : 'false'}
       data-lenis-active={lenisActive ? 'true' : 'false'}
@@ -590,7 +714,7 @@ function AppShell() {
         onSelectSection={handleSelectSection}
       />
 
-      {/* Optional ?debug=1 overlay (never rendered unless ?debug=1 is in URL) */}
+      {/* Optional ?debug=1 overlay (updated via DOM refs, never triggers React state re-renders) */}
       {isDebugOverlayEnabled && (
         <aside
           data-testid="debug-hud"
@@ -598,29 +722,59 @@ function AppShell() {
           className="fixed bottom-3 right-3 z-50 border border-[#262C36] bg-[#0B0D10]/95 px-3 py-2 font-data-mono text-[11px] leading-snug text-[#E8E4DA] pointer-events-none"
         >
           <div>
-            tier: <span className="text-[#4FD1D9]">{currentTierLabel}</span>
+            tier:{' '}
+            <span ref={debugTierSpanRef} className="text-[#4FD1D9]">
+              {currentTierLabel}
+            </span>
           </div>
           <div>
-            fps: <span className="text-[#E8E4DA]">{plainView ? 0 : debugStats.fps}</span>
+            fps:{' '}
+            <span ref={debugFpsSpanRef} className="text-[#E8E4DA]">
+              {plainView ? 0 : initialStats.fps}
+            </span>
           </div>
           <div>
-            particles: <span className="text-[#E8E4DA]">{currentParticleTotal}</span>
-            {!plainView && (
-              <span className="text-[#9A968E]">
-                {' '}
-                ({debugStats.particleCount}+{debugStats.ambientParticleCount})
-              </span>
-            )}
+            particles:{' '}
+            <span ref={debugParticlesSpanRef} className="text-[#E8E4DA]">
+              {currentParticleTotal}
+            </span>
+            <span ref={debugParticlesSubSpanRef} className="text-[#9A968E]">
+              {!plainView
+                ? ` (${initialStats.particleCount}+${initialStats.ambientParticleCount})`
+                : ''}
+            </span>
           </div>
           <div>
             pixel ratio:{' '}
-            <span className="text-[#E8E4DA]">
-              {plainView ? 1 : debugStats.pixelRatio}
+            <span ref={debugDprSpanRef} className="text-[#E8E4DA]">
+              {plainView ? 1 : initialStats.pixelRatio}
             </span>
           </div>
           <div>
             lenis:{' '}
-            <span className="text-[#4FD1D9]">{lenisActive ? 'on' : 'off'}</span>
+            <span ref={debugLenisSpanRef} className="text-[#4FD1D9]">
+              {lenisActive ? 'on' : 'off'}
+            </span>
+          </div>
+          <div>
+            intro mounts:{' '}
+            <span
+              ref={debugIntroMountsSpanRef}
+              data-testid="debug-intro-mounts"
+              className="text-[#4FD1D9]"
+            >
+              {getIntroMountCount()}
+            </span>
+          </div>
+          <div>
+            root renders:{' '}
+            <span
+              ref={debugRootRendersSpanRef}
+              data-testid="debug-root-renders"
+              className="text-[#E8E4DA]"
+            >
+              {rootRenderCountRef.current}
+            </span>
           </div>
         </aside>
       )}
@@ -637,9 +791,10 @@ function AppShell() {
               isRepeatVisit={isRepeatVisit}
               soundMuted={soundMuted}
               scrollMetricsRef={scrollMetricsRef}
-              onIntroComplete={() => setIntroComplete(true)}
+              onIntroComplete={handleIntroComplete}
+              onIntroMountDiagnostic={handleIntroMountDiagnostic}
               onScrollToTop={handleScrollToTop}
-              onDebugStatsChange={setDebugStats}
+              onDebugStatsChange={handleDebugStatsChange}
             />
           }
         />

@@ -1,13 +1,24 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { SITE_CONFIG } from './config';
 import { TERMINAL_LINES } from './terminalLines';
-import { markVisited } from './particleMath';
+import {
+  incrementIntroMountCount,
+  isIntroFinishedInSession,
+  markIntroFinishedInSession,
+} from './particleMath';
 import { playTerminalKeyClick } from './soundEngine';
+
+const TOTAL_TERMINAL_CHARS = TERMINAL_LINES.reduce(
+  (acc, line) => acc + line.text.length,
+  0,
+);
 
 interface TerminalIntroProps {
   isRepeatVisit: boolean;
   soundMuted?: boolean;
   onComplete: () => void;
+  /** Optional ref-based notification when the intro mounts (used by ?debug=1 DOM counter without state re-renders) */
+  onMountDiagnostic?: (mountCount: number) => void;
 }
 
 /**
@@ -16,48 +27,88 @@ interface TerminalIntroProps {
  * types the lines from `src/terminalLines.ts`, clears the terminal,
  * and resolves into the hero view.
  *
- * - First visit: ~8 seconds total duration
- * - Repeat visit: ~2 seconds total duration
- * - Visible "Skip" button works at any moment
+ * - First visit: ~8 seconds total duration (hard failsafe at 10 seconds)
+ * - Repeat visit: ~2 seconds total duration (hard failsafe at 3 seconds)
+ * - Main effect runs strictly ONCE on mount (`[]` dependency array)
+ * - Visible "Skip" button ends the intro immediately and reliably at any moment
  */
 export function TerminalIntro({
   isRepeatVisit,
   soundMuted = true,
   onComplete,
+  onMountDiagnostic,
 }: TerminalIntroProps) {
-  const totalDurationMs = isRepeatVisit
-    ? SITE_CONFIG.timings.repeatVisitDurationMs
-    : SITE_CONFIG.timings.firstVisitDurationMs;
-
-  const typingBudgetMs = Math.max(600, totalDurationMs - SITE_CONFIG.timings.clearHoldMs);
-  const totalChars = TERMINAL_LINES.reduce((acc, line) => acc + line.text.length, 0);
-
   const [revealedChars, setRevealedChars] = useState<number>(0);
   const [isClearing, setIsClearing] = useState<boolean>(false);
-  const completedRef = useRef<boolean>(false);
-  const lastClickedCharRef = useRef<number>(0);
+
+  // Store all callbacks and initial flags in refs so effects never re-run on parent re-renders
+  const completedRef = useRef<boolean>(isIntroFinishedInSession());
+  const isRepeatVisitRef = useRef<boolean>(isRepeatVisit);
   const soundMutedRef = useRef<boolean>(soundMuted);
+  const onCompleteRef = useRef<() => void>(onComplete);
+  const onMountDiagnosticRef = useRef<typeof onMountDiagnostic>(onMountDiagnostic);
 
-  useEffect(() => {
-    soundMutedRef.current = soundMuted;
-  }, [soundMuted]);
+  const rafIdRef = useRef<number>(0);
+  const clearTimerIdRef = useRef<number>(0);
+  const failsafeTimerIdRef = useRef<number>(0);
+  const lastClickedCharRef = useRef<number>(0);
 
+  onCompleteRef.current = onComplete;
+  soundMutedRef.current = soundMuted;
+  onMountDiagnosticRef.current = onMountDiagnostic;
+
+  // Stable completion handler with empty dependency array — guaranteed to fire at most once
   const finishIntro = useCallback(() => {
     if (completedRef.current) return;
     completedRef.current = true;
-    markVisited();
-    onComplete();
-  }, [onComplete]);
 
+    window.cancelAnimationFrame(rafIdRef.current);
+    window.clearTimeout(clearTimerIdRef.current);
+    window.clearTimeout(failsafeTimerIdRef.current);
+
+    markIntroFinishedInSession();
+    onCompleteRef.current();
+  }, []);
+
+  const finishIntroRef = useRef<() => void>(finishIntro);
+  finishIntroRef.current = finishIntro;
+
+  // Main typing & failsafe effect — runs ONCE on mount (empty dependency array [])
   useEffect(() => {
+    const mounts = incrementIntroMountCount();
+    onMountDiagnosticRef.current?.(mounts);
+
+    if (completedRef.current || isIntroFinishedInSession()) {
+      finishIntroRef.current();
+      return;
+    }
+
+    const repeat = isRepeatVisitRef.current;
+    const totalDurationMs = repeat
+      ? SITE_CONFIG.timings.repeatVisitDurationMs
+      : SITE_CONFIG.timings.firstVisitDurationMs;
+    const failsafeMs = repeat
+      ? SITE_CONFIG.timings.repeatVisitFailsafeMs
+      : SITE_CONFIG.timings.firstVisitFailsafeMs;
+
+    const typingBudgetMs = Math.max(
+      600,
+      totalDurationMs - SITE_CONFIG.timings.clearHoldMs,
+    );
     const startTime = performance.now();
-    let rafId = 0;
-    let clearTimerId = 0;
+
+    // Hard failsafe: whatever else happens, end the intro after at most 10s (first visit) or 3s (repeat visit)
+    failsafeTimerIdRef.current = window.setTimeout(() => {
+      finishIntroRef.current();
+    }, failsafeMs);
 
     const tick = (now: number) => {
-      const elapsed = now - startTime;
+      if (completedRef.current) return;
+
+      const elapsed = Math.max(0, now - startTime);
       const progress = Math.min(1, elapsed / typingBudgetMs);
-      const nextChars = Math.floor(progress * totalChars);
+      const nextChars = Math.floor(progress * TOTAL_TERMINAL_CHARS);
+
       if (nextChars > lastClickedCharRef.current) {
         lastClickedCharRef.current = nextChars;
         playTerminalKeyClick(soundMutedRef.current);
@@ -65,33 +116,31 @@ export function TerminalIntro({
       setRevealedChars(nextChars);
 
       if (progress < 1) {
-        rafId = window.requestAnimationFrame(tick);
+        rafIdRef.current = window.requestAnimationFrame(tick);
       } else {
         setIsClearing(true);
-        clearTimerId = window.setTimeout(() => {
-          finishIntro();
+        clearTimerIdRef.current = window.setTimeout(() => {
+          finishIntroRef.current();
         }, SITE_CONFIG.timings.clearHoldMs);
       }
     };
 
-    rafId = window.requestAnimationFrame(tick);
+    rafIdRef.current = window.requestAnimationFrame(tick);
 
-    return () => {
-      window.cancelAnimationFrame(rafId);
-      window.clearTimeout(clearTimerId);
-    };
-  }, [typingBudgetMs, totalChars, finishIntro]);
-
-  // Allow Escape key to skip at any time
-  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        finishIntro();
+        finishIntroRef.current();
       }
     };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [finishIntro]);
+
+    return () => {
+      window.cancelAnimationFrame(rafIdRef.current);
+      window.clearTimeout(clearTimerIdRef.current);
+      window.clearTimeout(failsafeTimerIdRef.current);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, []);
 
   // Slice lines according to current character budget
   let remaining = revealedChars;
@@ -124,8 +173,9 @@ export function TerminalIntro({
 
         <button
           type="button"
+          data-testid="skip-intro-button"
           onClick={finishIntro}
-          className="cursor-pointer rounded border border-[#262C36] bg-[#0B0D10] px-4 py-2 text-xs font-medium tracking-wider text-[#E8E4DA] transition-colors duration-150 hover:border-[#4FD1D9] hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] min-h-[40px]"
+          className="cursor-pointer rounded border border-[#262C36] bg-[#0B0D10] px-4 py-2 text-xs font-medium tracking-wider text-[#E8E4DA] transition-colors duration-150 hover:border-[#4FD1D9] hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] min-h-[44px]"
         >
           Skip
         </button>
@@ -173,14 +223,21 @@ export function TerminalIntro({
         <div className="flex items-center justify-between text-xs text-[#9A968E] mb-2">
           <span>resolving identity</span>
           <span>
-            {Math.min(100, Math.round((revealedChars / Math.max(1, totalChars)) * 100))}%
+            {Math.min(
+              100,
+              Math.round((revealedChars / Math.max(1, TOTAL_TERMINAL_CHARS)) * 100),
+            )}
+            %
           </span>
         </div>
         <div className="h-px w-full bg-[#262C36] overflow-hidden">
           <div
             className="h-full bg-[#4FD1D9] transition-transform duration-75 origin-left"
             style={{
-              transform: `scaleX(${Math.min(1, revealedChars / Math.max(1, totalChars))})`,
+              transform: `scaleX(${Math.min(
+                1,
+                revealedChars / Math.max(1, TOTAL_TERMINAL_CHARS),
+              )})`,
             }}
           />
         </div>
