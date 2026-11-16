@@ -14,18 +14,26 @@ import {
   useLocation,
 } from 'react-router-dom';
 import Lenis from 'lenis';
-import { SITE_CONFIG, type SectionId } from './config';
+import {
+  SITE_CONFIG,
+  type QualityTierName,
+  type SectionId,
+} from './config';
 import {
   computeScrollMetrics,
+  createInitialSectionVisibilityMap,
   getInitialPlainView,
   getIntroMountCount,
   hasVisitedBefore,
   isIntroFinishedInSession,
   isSaveDataEnabled,
   markIntroFinishedInSession,
+  resolveInitialHashSectionId,
+  resolveMorphParticleCount,
   resolveQualityTierProfile,
   resolveStartingQualityTier,
   savePlainViewPreference,
+  shouldDisableMorph,
   shouldSkipIntroOnLoad,
   type ScrollMetrics,
 } from './particleMath';
@@ -37,7 +45,10 @@ import {
 } from './soundEngine';
 import { TerminalIntro } from './TerminalIntro';
 import { Navbar } from './Navbar';
-import { PortfolioSections } from './PortfolioSections';
+import {
+  PortfolioSections,
+  type ScrollArrivalController,
+} from './PortfolioSections';
 import type { SceneDebugStats } from './DeltaScene';
 
 // Lazy-load the Three.js scene after first paint so hero HTML (name, tagline, nav) renders immediately
@@ -82,10 +93,12 @@ function usePrefersReducedMotion(): boolean {
 function HomeView({
   reducedMotion,
   plainView,
+  qualityTier,
   introComplete,
   isRepeatVisit,
   soundMuted,
   scrollMetricsRef,
+  scrollArrivalRef,
   onIntroComplete,
   onIntroMountDiagnostic,
   onScrollToTop,
@@ -93,10 +106,12 @@ function HomeView({
 }: {
   reducedMotion: boolean;
   plainView: boolean;
+  qualityTier: QualityTierName;
   introComplete: boolean;
   isRepeatVisit: boolean;
   soundMuted: boolean;
   scrollMetricsRef: MutableRefObject<ScrollMetrics>;
+  scrollArrivalRef: MutableRefObject<ScrollArrivalController>;
   onIntroComplete: () => void;
   onIntroMountDiagnostic: (mounts: number) => void;
   onScrollToTop: () => void;
@@ -148,6 +163,7 @@ function HomeView({
           <LazyDeltaScene
             reducedMotion={reducedMotion}
             scrollMetricsRef={scrollMetricsRef}
+            scrollArrivalRef={scrollArrivalRef}
             onDebugStatsChange={onDebugStatsChange}
           />
         </Suspense>
@@ -201,6 +217,8 @@ function HomeView({
         <PortfolioSections
           reducedMotion={reducedMotion}
           plainView={plainView}
+          qualityTier={qualityTier}
+          scrollArrivalRef={scrollArrivalRef}
           onScrollToTop={onScrollToTop}
         />
       </main>
@@ -289,7 +307,7 @@ function AppShell() {
 
   const lenisActive = !(reducedMotion || plainView);
 
-  // Keep FPS, tier, particle counts, and DPR in refs — NEVER in React state that re-renders AppShell
+  // Keep FPS, tier, particle counts, DPR, and morph state in refs — NEVER in React state that re-renders AppShell
   const debugStatsRef = useRef<SceneDebugStats>((() => {
     const w = typeof window !== 'undefined' ? window.innerWidth : 1280;
     const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
@@ -307,12 +325,21 @@ function AppShell() {
       viewportWidth: w,
       devicePixelRatio: dpr,
     });
+    const morphDisabled = shouldDisableMorph({
+      plainView,
+      prefersReducedMotion: reducedMotion,
+      qualityTier: prof.tier,
+      saveData: isSaveDataEnabled(),
+      viewportWidth: w,
+    });
     return {
       tier: prof.tier,
       fps: 60,
       particleCount: prof.particleCount,
       ambientParticleCount: prof.ambientField ? prof.ambientParticleCount : 0,
       pixelRatio: prof.pixelRatio,
+      morphState: 'HERO',
+      morphParticleCount: resolveMorphParticleCount(prof.tier, morphDisabled),
     };
   })());
 
@@ -321,6 +348,8 @@ function AppShell() {
   const debugFpsSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugParticlesSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugParticlesSubSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugMorphStateSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugMorphCountSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugDprSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugLenisSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugIntroMountsSpanRef = useRef<HTMLSpanElement | null>(null);
@@ -336,9 +365,12 @@ function AppShell() {
     const totalParticles = isPlain
       ? 0
       : stats.particleCount + stats.ambientParticleCount;
+    const morphStateLabel = isPlain ? 'AMBIENT' : stats.morphState;
+    const morphCountVal = isPlain ? 0 : stats.morphParticleCount;
 
     if (appRootRef.current) {
       appRootRef.current.setAttribute('data-quality-tier', tierLabel);
+      appRootRef.current.setAttribute('data-morph-state', morphStateLabel);
     }
     if (debugTierSpanRef.current) {
       debugTierSpanRef.current.textContent = tierLabel;
@@ -353,6 +385,12 @@ function AppShell() {
       debugParticlesSubSpanRef.current.textContent = isPlain
         ? ''
         : ` (${stats.particleCount}+${stats.ambientParticleCount})`;
+    }
+    if (debugMorphStateSpanRef.current) {
+      debugMorphStateSpanRef.current.textContent = morphStateLabel;
+    }
+    if (debugMorphCountSpanRef.current) {
+      debugMorphCountSpanRef.current.textContent = String(morphCountVal);
     }
     if (debugDprSpanRef.current) {
       debugDprSpanRef.current.textContent = String(
@@ -369,10 +407,19 @@ function AppShell() {
     }
   }, []);
 
+  const [qualityTier, setQualityTier] = useState<QualityTierName>(
+    () => debugStatsRef.current.tier,
+  );
+
   const handleDebugStatsChange = useCallback(
     (stats: SceneDebugStats) => {
+      const prevTier = debugStatsRef.current.tier;
       debugStatsRef.current = stats;
       syncDebugHudDom();
+      // Only update React state when the quality tier itself changes (at most once or twice per session)
+      if (stats.tier !== prevTier) {
+        setQualityTier(stats.tier);
+      }
     },
     [syncDebugHudDom],
   );
@@ -390,6 +437,16 @@ function AppShell() {
     new URLSearchParams(location.search).get('debug') === '1';
 
   const lenisRef = useRef<Lenis | null>(null);
+  const transitTimerRef = useRef<number>(0);
+  const scrollArrivalRef = useRef<ScrollArrivalController>({
+    velocity: 0,
+    settledSinceMs: 0,
+    inTransitTargetId: null,
+    settleListeners: new Set(),
+    arrivedSectionId: 'home',
+    inViewMap: createInitialSectionVisibilityMap(),
+  });
+
   const scrollMetricsRef = useRef<ScrollMetrics>(
     computeScrollMetrics({
       scrollY: 0,
@@ -486,8 +543,41 @@ function AppShell() {
     });
     lenisRef.current = lenis;
 
-    // Expose scroll metrics strictly from Lenis's scroll event
+    let settleTimerId = 0;
+
+    // Expose scroll metrics and velocity strictly from Lenis's scroll event
     lenis.on('scroll', (instance: Lenis) => {
+      const absVel = Math.abs(instance.velocity);
+      const ctrl = scrollArrivalRef.current;
+      const velThreshold = SITE_CONFIG.sectionReveal.velocityThreshold;
+      const settleMs = SITE_CONFIG.sectionReveal.settleDurationMs;
+      const now =
+        typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const wasAboveThreshold = ctrl.velocity > velThreshold;
+
+      ctrl.velocity = absVel;
+
+      if (absVel > velThreshold) {
+        ctrl.settledSinceMs = now;
+        window.clearTimeout(settleTimerId);
+        settleTimerId = window.setTimeout(() => {
+          ctrl.velocity = 0;
+          ctrl.settledSinceMs = 0;
+          ctrl.settleListeners.forEach((cb) => cb());
+        }, settleMs + 20);
+      } else {
+        if (wasAboveThreshold) {
+          ctrl.settledSinceMs = now;
+          window.clearTimeout(settleTimerId);
+          settleTimerId = window.setTimeout(() => {
+            ctrl.settleListeners.forEach((cb) => cb());
+          }, settleMs + 5);
+        }
+        if (now - ctrl.settledSinceMs >= settleMs) {
+          ctrl.settleListeners.forEach((cb) => cb());
+        }
+      }
+
       applyScrollPosition(instance.scroll);
     });
 
@@ -530,6 +620,7 @@ function AppShell() {
     return () => {
       window.cancelAnimationFrame(rafId);
       window.clearTimeout(resizeTimerId);
+      window.clearTimeout(settleTimerId);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('resize', onResize);
       lenis.destroy();
@@ -541,22 +632,72 @@ function AppShell() {
 
   /**
    * Unified scroll helper using `lenis.scrollTo` with fixed top bar offset.
-   * Falls back to direct DOM scrollTop assignment only when Lenis is disabled
-   * (Plain view or prefers-reduced-motion).
+   * Tracks in-transit nav target sections so passed sections do not animate in transit,
+   * and immediately reveals the landed section when `scrollTo` finishes.
    */
   const scrollToTarget = useCallback(
     (
       target: number | string | HTMLElement,
-      options?: { immediate?: boolean; offset?: number },
+      options?: {
+        immediate?: boolean;
+        offset?: number;
+        targetSectionId?: SectionId;
+      },
     ) => {
       const offset =
         options?.offset ??
         (target === 0 ? 0 : SITE_CONFIG.lenis.headerOffsetPx);
       const immediate = Boolean(options?.immediate);
+      const targetSectionId = options?.targetSectionId;
+
+      window.clearTimeout(transitTimerRef.current);
+      const ctrl = scrollArrivalRef.current;
 
       const lenis = lenisRef.current;
       if (lenis) {
+        if (!immediate && targetSectionId) {
+          ctrl.inTransitTargetId = targetSectionId;
+          // Leaving the current section during a nav jump returns particles to AMBIENT while in transit
+          // (so jumping Home -> Connect never flashes TOPOLOGY on the way)
+          if (ctrl.arrivedSectionId !== targetSectionId) {
+            ctrl.arrivedSectionId = null;
+          }
+          let completed = false;
+          const finishNavScroll = () => {
+            if (completed) return;
+            completed = true;
+            window.clearTimeout(transitTimerRef.current);
+            if (ctrl.inTransitTargetId === targetSectionId) {
+              ctrl.inTransitTargetId = null;
+            }
+            ctrl.velocity = 0;
+            ctrl.settledSinceMs = 0;
+            ctrl.arrivedSectionId = targetSectionId;
+            ctrl.onLandSection?.(targetSectionId);
+            ctrl.settleListeners.forEach((cb) => cb());
+          };
+
+          lenis.scrollTo(target, {
+            offset,
+            immediate: false,
+            onComplete: finishNavScroll,
+          });
+
+          transitTimerRef.current = window.setTimeout(
+            finishNavScroll,
+            Math.ceil(SITE_CONFIG.lenis.duration * 1000) + 120,
+          );
+          return;
+        }
+
+        ctrl.inTransitTargetId = null;
+        ctrl.velocity = 0;
+        ctrl.settledSinceMs = 0;
         lenis.scrollTo(target, { offset, immediate });
+        if (targetSectionId) {
+          ctrl.arrivedSectionId = targetSectionId;
+          ctrl.onLandSection?.(targetSectionId);
+        }
         if (immediate && typeof target === 'number') {
           applyScrollPosition(target);
         }
@@ -564,6 +705,14 @@ function AppShell() {
       }
 
       // Native fallback when Lenis is not initialised (Plain view or reducedMotion)
+      ctrl.inTransitTargetId = null;
+      ctrl.velocity = 0;
+      ctrl.settledSinceMs = 0;
+      if (targetSectionId) {
+        ctrl.arrivedSectionId = targetSectionId;
+        ctrl.onLandSection?.(targetSectionId);
+      }
+
       if (typeof document === 'undefined') return;
       let targetTop = 0;
       if (typeof target === 'number') {
@@ -589,20 +738,40 @@ function AppShell() {
     [applyScrollPosition],
   );
 
+  const initialHashHandledRef = useRef<boolean>(false);
+
   // On route changes (/, /writeups, /writeups/:slug), scroll to top immediately with lenis.scrollTo(0, { immediate: true })
   // or scroll to the requested section hash on `/`
   useEffect(() => {
     if (currentRoute.kind === 'portfolio' && location.hash) {
-      const targetSelector = location.hash;
+      const hashSecId = resolveInitialHashSectionId(location.hash);
+      const targetSelector = hashSecId ? `#${hashSecId}` : location.hash;
+      const isInitialLoad = !initialHashHandledRef.current;
+      initialHashHandledRef.current = true;
+
+      if (isInitialLoad) {
+        // If the page loads with a hash (e.g. #Connect), jump and reveal immediately without a wait
+        const timer = window.setTimeout(() => {
+          scrollToTarget(targetSelector, {
+            immediate: true,
+            offset: SITE_CONFIG.lenis.headerOffsetPx,
+            targetSectionId: hashSecId ?? undefined,
+          });
+        }, 0);
+        return () => window.clearTimeout(timer);
+      }
+
       const timer = window.setTimeout(() => {
         scrollToTarget(targetSelector, {
           offset: SITE_CONFIG.lenis.headerOffsetPx,
+          targetSectionId: hashSecId ?? undefined,
         });
       }, 20);
       return () => window.clearTimeout(timer);
     }
 
-    scrollToTarget(0, { immediate: true, offset: 0 });
+    initialHashHandledRef.current = true;
+    scrollToTarget(0, { immediate: true, offset: 0, targetSectionId: 'home' });
   }, [location.pathname, location.hash, currentRoute.kind, scrollToTarget]);
 
   // If user navigates to a write-up page or has ?intro=0, mark intro as complete so returning to `/` is seamless
@@ -650,10 +819,11 @@ function AppShell() {
   const handleSelectSection = useCallback(
     (id: SectionId) => {
       if (id === 'home') {
-        scrollToTarget(0, { offset: 0 });
+        scrollToTarget(0, { offset: 0, targetSectionId: 'home' });
       } else {
         scrollToTarget(`#${id}`, {
           offset: SITE_CONFIG.lenis.headerOffsetPx,
+          targetSectionId: id,
         });
       }
       lastActiveSectionRef.current = id;
@@ -663,7 +833,7 @@ function AppShell() {
   );
 
   const handleScrollToTop = useCallback(() => {
-    scrollToTarget(0, { offset: 0 });
+    scrollToTarget(0, { offset: 0, targetSectionId: 'home' });
     lastActiveSectionRef.current = 'home';
     setActiveSection('home');
   }, [scrollToTarget]);
@@ -681,6 +851,7 @@ function AppShell() {
       data-plain-view={plainView ? 'true' : 'false'}
       data-lenis-active={lenisActive ? 'true' : 'false'}
       data-quality-tier={currentTierLabel}
+      data-morph-state={plainView ? 'AMBIENT' : initialStats.morphState}
       data-active-section={activeSection}
       data-scroll-progress={pageProgress.toFixed(2)}
       data-route-kind={currentRoute.kind}
@@ -745,6 +916,26 @@ function AppShell() {
             </span>
           </div>
           <div>
+            morph state:{' '}
+            <span
+              ref={debugMorphStateSpanRef}
+              data-testid="debug-morph-state"
+              className="text-[#4FD1D9]"
+            >
+              {plainView ? 'AMBIENT' : initialStats.morphState}
+            </span>
+          </div>
+          <div>
+            morph particles:{' '}
+            <span
+              ref={debugMorphCountSpanRef}
+              data-testid="debug-morph-particles"
+              className="text-[#E8E4DA]"
+            >
+              {plainView ? 0 : initialStats.morphParticleCount}
+            </span>
+          </div>
+          <div>
             pixel ratio:{' '}
             <span ref={debugDprSpanRef} className="text-[#E8E4DA]">
               {plainView ? 1 : initialStats.pixelRatio}
@@ -787,10 +978,12 @@ function AppShell() {
             <HomeView
               reducedMotion={reducedMotion}
               plainView={plainView}
+              qualityTier={qualityTier}
               introComplete={introComplete}
               isRepeatVisit={isRepeatVisit}
               soundMuted={soundMuted}
               scrollMetricsRef={scrollMetricsRef}
+              scrollArrivalRef={scrollArrivalRef}
               onIntroComplete={handleIntroComplete}
               onIntroMountDiagnostic={handleIntroMountDiagnostic}
               onScrollToTop={handleScrollToTop}

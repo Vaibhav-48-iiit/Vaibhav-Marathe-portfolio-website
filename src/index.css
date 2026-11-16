@@ -130,4 +130,11 @@ html.lenis body {
     color: #111111 !important;
     text-decoration: underline !important;
   }
+
+  [data-reveal-item] {
+    opacity: 1 !important;
+    transform: none !important;
+    transition: none !important;
+    will-change: auto !important;
+  }
 }

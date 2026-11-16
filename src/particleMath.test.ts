@@ -22,6 +22,22 @@ import {
   getIntroMountCount,
   resetIntroSessionStateForTests,
   shouldSkipIntroOnLoad,
+  shouldDisableSectionReveal,
+  computeRevealStaggerDelayMs,
+  resolveInitialHashSectionId,
+  shouldTriggerSectionArrival,
+  shouldDisableMorph,
+  resolveMorphParticleCount,
+  createInitialSectionVisibilityMap,
+  resolveDominantArrivedSection,
+  stepMorphStateMachine,
+  generateTopologyTargets,
+  computeTopologyNodePortScanIntensities,
+  computeHashMorphProgress,
+  sampleAndMatchGlyphPairFromRgba,
+  stepCriticallyDampedSpringBuffer,
+  computeShapeEffectiveMaxOpacity,
+  selectNonOverlappingLitLeafNodes,
 } from './particleMath';
 import { buildWriteupHref, resolveRoute } from './router';
 import {
@@ -631,3 +647,439 @@ test('hasVisitedBefore and markVisited handle working and throwing storage safel
   assert.equal(hasVisitedBefore(brokenStorage), false);
   assert.doesNotThrow(() => markVisited(brokenStorage));
 });
+
+test('Section-arrival reveal: config timings, 8-item stagger cap (<900ms), transit suppression, hash resolution, and disable conditions', () => {
+  // 1. Config values
+  assert.equal(SITE_CONFIG.sectionReveal.durationMs, 500);
+  assert.equal(SITE_CONFIG.sectionReveal.easing, 'ease-out');
+  assert.equal(SITE_CONFIG.sectionReveal.translateYDistancePx, 12);
+  assert.equal(SITE_CONFIG.sectionReveal.staggerMs, 40);
+  assert.equal(SITE_CONFIG.sectionReveal.staggerCap, 8);
+  assert.equal(SITE_CONFIG.sectionReveal.intersectionThreshold, 0.25);
+  assert.equal(SITE_CONFIG.sectionReveal.settleDurationMs, 120);
+  assert.equal(SITE_CONFIG.sectionReveal.failsafeTimeoutMs, 3000);
+
+  // 2. Stagger delay capped at 8 items (indices 0..7 -> max delay 280ms; 280 + 500 = 780ms < 900ms)
+  assert.equal(computeRevealStaggerDelayMs(0), 0);
+  assert.equal(computeRevealStaggerDelayMs(1), 40);
+  assert.equal(computeRevealStaggerDelayMs(7), 280);
+  assert.equal(computeRevealStaggerDelayMs(8), 280);
+  assert.equal(computeRevealStaggerDelayMs(25), 280);
+  assert.ok(
+    computeRevealStaggerDelayMs(99) + SITE_CONFIG.sectionReveal.durationMs < 900,
+    'Entire section stagger + duration must finish in under 900ms',
+  );
+
+  // 3. Initial hash case-insensitive resolution (e.g. #Connect -> 'connect')
+  assert.equal(resolveInitialHashSectionId('#Connect'), 'connect');
+  assert.equal(resolveInitialHashSectionId('#connect'), 'connect');
+  assert.equal(resolveInitialHashSectionId('#Background'), 'background');
+  assert.equal(resolveInitialHashSectionId('#home'), null);
+  assert.equal(resolveInitialHashSectionId(''), null);
+
+  // 4. Arrival trigger: 25% threshold, settled velocity, once-only, and nav-glide transit suppression
+  assert.equal(
+    shouldTriggerSectionArrival({
+      sectionId: 'background',
+      alreadyRevealed: false,
+      isIntersecting: true,
+      intersectionRatio: 0.2,
+      inTransitTargetId: null,
+      isVelocitySettled: true,
+    }),
+    false,
+    'Below 25% visibility must not trigger arrival',
+  );
+
+  assert.equal(
+    shouldTriggerSectionArrival({
+      sectionId: 'background',
+      alreadyRevealed: false,
+      isIntersecting: true,
+      intersectionRatio: 0.4,
+      inTransitTargetId: 'connect',
+      isVelocitySettled: true,
+    }),
+    false,
+    'Section passed in transit to #connect must not animate while passing',
+  );
+
+  assert.equal(
+    shouldTriggerSectionArrival({
+      sectionId: 'background',
+      alreadyRevealed: false,
+      isIntersecting: true,
+      intersectionRatio: 0.3,
+      inTransitTargetId: null,
+      isVelocitySettled: false,
+    }),
+    false,
+    'Unsettled scroll velocity must wait until settled',
+  );
+
+  assert.equal(
+    shouldTriggerSectionArrival({
+      sectionId: 'background',
+      alreadyRevealed: false,
+      isIntersecting: true,
+      intersectionRatio: 0.25,
+      inTransitTargetId: null,
+      isVelocitySettled: true,
+    }),
+    true,
+    'Settled velocity at >= 25% visibility triggers arrival',
+  );
+
+  assert.equal(
+    shouldTriggerSectionArrival({
+      sectionId: 'background',
+      alreadyRevealed: true,
+      isIntersecting: true,
+      intersectionRatio: 0.8,
+      inTransitTargetId: null,
+      isVelocitySettled: true,
+    }),
+    false,
+    'Already revealed section never re-animates',
+  );
+
+  // 5. Disable conditions: Plain view, reduced motion, low tier, Save-Data, print
+  assert.equal(
+    shouldDisableSectionReveal({
+      plainView: false,
+      prefersReducedMotion: false,
+      qualityTier: 'high',
+      saveData: false,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldDisableSectionReveal({
+      plainView: true,
+      prefersReducedMotion: false,
+      qualityTier: 'high',
+      saveData: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDisableSectionReveal({
+      plainView: false,
+      prefersReducedMotion: true,
+      qualityTier: 'high',
+      saveData: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDisableSectionReveal({
+      plainView: false,
+      prefersReducedMotion: false,
+      qualityTier: 'low',
+      saveData: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDisableSectionReveal({
+      plainView: false,
+      prefersReducedMotion: false,
+      qualityTier: 'medium',
+      saveData: true,
+    }),
+    true,
+  );
+});
+
+test('Particle morph system: state machine transitions, tier particle counts, topology targets, port scan, glyph matching, spring solver, and overlap cap', () => {
+  // 1. Tier particle counts & disable conditions
+  assert.equal(
+    shouldDisableMorph({
+      plainView: false,
+      prefersReducedMotion: false,
+      qualityTier: 'high',
+      saveData: false,
+      viewportWidth: 1440,
+    }),
+    false,
+  );
+  assert.equal(resolveMorphParticleCount('high', false), 1200);
+  assert.equal(resolveMorphParticleCount('medium', false), 600);
+  assert.equal(resolveMorphParticleCount('low', false), 0);
+  assert.equal(resolveMorphParticleCount('high', true), 0);
+
+  // Mobile (< 768px) disables morphs by default (MORPH_ON_MOBILE = false)
+  assert.equal(
+    shouldDisableMorph({
+      plainView: false,
+      prefersReducedMotion: false,
+      qualityTier: 'high',
+      saveData: false,
+      viewportWidth: 375,
+    }),
+    true,
+  );
+
+  // 2. Dominant arrived section & in-transit suppression
+  const visMap = createInitialSectionVisibilityMap();
+  visMap.home = { isIntersecting: false, ratio: 0 };
+  visMap.skills = { isIntersecting: true, ratio: 0.65 };
+  assert.equal(
+    resolveDominantArrivedSection({
+      inViewMap: visMap,
+      heroProgress: 1,
+      pageProgress: 0.4,
+      inTransitTargetId: 'connect',
+      isVelocitySettled: true,
+      currentArrivedSection: null,
+    }),
+    null,
+    'While in transit to #connect, intermediate sections like #skills must not trigger arrival',
+  );
+  assert.equal(
+    resolveDominantArrivedSection({
+      inViewMap: visMap,
+      heroProgress: 1,
+      pageProgress: 0.4,
+      inTransitTargetId: null,
+      isVelocitySettled: true,
+      currentArrivedSection: null,
+    }),
+    'skills',
+    'Once velocity settles and not in transit, #skills becomes arrived section',
+  );
+
+  // 3. State machine: HERO -> AMBIENT -> TOPOLOGY -> AMBIENT -> TOPOLOGY (replay) -> DOLLAR -> HASH
+  let state = stepMorphStateMachine({
+    currentState: 'HERO',
+    stateEnteredAtMs: 0,
+    dollarFormationCompleteMs: 0,
+    nowMs: 100,
+    morphDisabled: false,
+    heroProgress: 0,
+    arrivedSection: 'home',
+    glyphsAvailable: true,
+  });
+  assert.equal(state.state, 'HERO');
+
+  // Scroll away from hero into Background
+  state = stepMorphStateMachine({
+    currentState: state.state,
+    stateEnteredAtMs: state.stateEnteredAtMs,
+    dollarFormationCompleteMs: state.dollarFormationCompleteMs,
+    nowMs: 500,
+    morphDisabled: false,
+    heroProgress: 1,
+    arrivedSection: 'background',
+    glyphsAvailable: true,
+  });
+  assert.equal(state.state, 'AMBIENT');
+
+  // Arrive at Skills -> TOPOLOGY
+  state = stepMorphStateMachine({
+    currentState: state.state,
+    stateEnteredAtMs: state.stateEnteredAtMs,
+    dollarFormationCompleteMs: state.dollarFormationCompleteMs,
+    nowMs: 1000,
+    morphDisabled: false,
+    heroProgress: 1,
+    arrivedSection: 'skills',
+    glyphsAvailable: true,
+  });
+  assert.equal(state.state, 'TOPOLOGY');
+  assert.equal(state.stateEnteredAtMs, 1000);
+
+  // Leave Skills for Projects -> back to AMBIENT
+  state = stepMorphStateMachine({
+    currentState: state.state,
+    stateEnteredAtMs: state.stateEnteredAtMs,
+    dollarFormationCompleteMs: state.dollarFormationCompleteMs,
+    nowMs: 2500,
+    morphDisabled: false,
+    heroProgress: 1,
+    arrivedSection: 'projects',
+    glyphsAvailable: true,
+  });
+  assert.equal(state.state, 'AMBIENT');
+
+  // Re-arrive at Skills -> replays TOPOLOGY
+  state = stepMorphStateMachine({
+    currentState: state.state,
+    stateEnteredAtMs: state.stateEnteredAtMs,
+    dollarFormationCompleteMs: state.dollarFormationCompleteMs,
+    nowMs: 3200,
+    morphDisabled: false,
+    heroProgress: 1,
+    arrivedSection: 'skills',
+    glyphsAvailable: true,
+  });
+  assert.equal(state.state, 'TOPOLOGY');
+  assert.equal(state.stateEnteredAtMs, 3200);
+
+  // Nav jump from Home straight to Connect: in-transit sets arrivedSection = null -> AMBIENT, then landing sets 'connect' -> DOLLAR (never TOPOLOGY)
+  const inTransitState = stepMorphStateMachine({
+    currentState: 'HERO',
+    stateEnteredAtMs: 0,
+    dollarFormationCompleteMs: 0,
+    nowMs: 4000,
+    morphDisabled: false,
+    heroProgress: 0.8,
+    arrivedSection: null,
+    glyphsAvailable: true,
+  });
+  assert.equal(inTransitState.state, 'AMBIENT');
+
+  const connectArriveTime = 4500;
+  const dollarState = stepMorphStateMachine({
+    currentState: inTransitState.state,
+    stateEnteredAtMs: inTransitState.stateEnteredAtMs,
+    dollarFormationCompleteMs: inTransitState.dollarFormationCompleteMs,
+    nowMs: connectArriveTime,
+    morphDisabled: false,
+    heroProgress: 1,
+    arrivedSection: 'connect',
+    glyphsAvailable: true,
+  });
+  assert.equal(dollarState.state, 'DOLLAR');
+
+  // Before formationDurationMs (1150) + dollarHoldMs (700) = 1850ms, stays DOLLAR
+  const dollarHolding = stepMorphStateMachine({
+    currentState: dollarState.state,
+    stateEnteredAtMs: dollarState.stateEnteredAtMs,
+    dollarFormationCompleteMs: dollarState.dollarFormationCompleteMs,
+    nowMs: connectArriveTime + 1500,
+    morphDisabled: false,
+    heroProgress: 1,
+    arrivedSection: 'connect',
+    glyphsAvailable: true,
+  });
+  assert.equal(dollarHolding.state, 'DOLLAR');
+
+  // At >= 1850ms after DOLLAR entry, transitions to HASH
+  const hashTransitionTime =
+    connectArriveTime + SITE_CONFIG.morph.formationDurationMs + SITE_CONFIG.morph.dollarHoldMs;
+  const hashState = stepMorphStateMachine({
+    currentState: dollarHolding.state,
+    stateEnteredAtMs: dollarHolding.stateEnteredAtMs,
+    dollarFormationCompleteMs: dollarHolding.dollarFormationCompleteMs,
+    nowMs: hashTransitionTime,
+    morphDisabled: false,
+    heroProgress: 1,
+    arrivedSection: 'connect',
+    glyphsAvailable: true,
+  });
+  assert.equal(hashState.state, 'HASH');
+
+  // Hash morph progress lerps 0 -> 1 over hashMorphDurationMs (1000ms)
+  assert.equal(computeHashMorphProgress(0, 1000), 0);
+  assert.ok(computeHashMorphProgress(500, 1000) > 0.8);
+  assert.equal(computeHashMorphProgress(1200, 1000), 1);
+
+  // 4. Hand-authored Topology: 15 nodes (1 gateway + 3 sub-hubs + 11 leaves), 16 edges, and port scan lighting
+  assert.equal(SITE_CONFIG.morph.topology.nodes.length, 15);
+  assert.equal(SITE_CONFIG.morph.topology.edges.length, 16);
+  const topo = generateTopologyTargets(1200);
+  assert.equal(topo.normalizedPositions.length, 1200 * 3);
+  assert.equal(topo.nodeAssignments.length, 1200);
+  assert.equal(topo.nodeParticleCounts.length, 15);
+
+  const scan0 = computeTopologyNodePortScanIntensities(15, 0, [4, 7, 11]);
+  assert.equal(scan0[4], 0);
+  const scanAfterAll = computeTopologyNodePortScanIntensities(15, 1600, [4, 7, 11]);
+  assert.equal(scanAfterAll[4], 1);
+  assert.equal(scanAfterAll[7], 1);
+  assert.equal(scanAfterAll[11], 1);
+  assert.equal(scanAfterAll[0], 0, 'Non-selected hub node remains dim');
+
+  // 5. Glyph pair sampling & 1-to-1 nearest-neighbour matching
+  const w = 64;
+  const h = 64;
+  const dollarRgba = new Uint8ClampedArray(w * h * 4);
+  const hashRgba = new Uint8ClampedArray(w * h * 4);
+  for (let y = 12; y < 52; y++) {
+    for (let x = 16; x < 48; x++) {
+      const idx = (y * w + x) * 4 + 3;
+      dollarRgba[idx] = 255;
+      hashRgba[idx] = 255;
+    }
+  }
+  const matched = sampleAndMatchGlyphPairFromRgba({
+    dollarRgba,
+    hashRgba,
+    width: w,
+    height: h,
+    count: 300,
+  });
+  assert.ok(matched !== null);
+  assert.equal(matched.dollarPositions.length, 300 * 3);
+  assert.equal(matched.hashPositions.length, 300 * 3);
+
+  // 6. Critically damped spring buffer: smooth retargeting without snapping & < 1ms for 1,200 particles
+  const count = 1200;
+  const currentPos = new Float32Array(count * 3);
+  const velocities = new Float32Array(count * 3);
+  const targetA = new Float32Array(count * 3);
+  const targetB = new Float32Array(count * 3);
+  for (let i = 0; i < count * 3; i++) {
+    targetA[i] = 2.0;
+    targetB[i] = -1.5;
+  }
+
+  const t0 = performance.now();
+  stepCriticallyDampedSpringBuffer(currentPos, velocities, targetA, 0.016, 4.6);
+  const elapsedMs = performance.now() - t0;
+  assert.ok(elapsedMs < 5, `Spring step took ${elapsedMs.toFixed(2)}ms, expected well under budget`);
+  const posAfterFirstStep = currentPos[0];
+  assert.ok(posAfterFirstStep > 0 && posAfterFirstStep < 2.0);
+
+  // Retarget mid-transition to targetB and verify no discontinuous snap
+  stepCriticallyDampedSpringBuffer(currentPos, velocities, targetB, 0.016, 4.6);
+  assert.ok(Math.abs(currentPos[0] - posAfterFirstStep) < 0.5, 'Mid-flight retargeting must not snap');
+
+  // 7. Readability overlap opacity cap (<= 0.18 when overlapping text blocks on desktop)
+  const shapeBox = { left: 700, top: 200, right: 1050, bottom: 600 };
+  const nonOverlappingText = [{ left: 80, top: 200, right: 640, bottom: 600 }];
+  const overlappingText = [{ left: 80, top: 200, right: 820, bottom: 600 }];
+
+  assert.equal(
+    computeShapeEffectiveMaxOpacity({
+      shapeBox,
+      textRects: nonOverlappingText,
+      configMaxOpacity: 0.9,
+      overlapCap: 0.18,
+    }).effectiveMaxOpacity,
+    0.9,
+  );
+  assert.equal(
+    computeShapeEffectiveMaxOpacity({
+      shapeBox,
+      textRects: overlappingText,
+      configMaxOpacity: 0.9,
+      overlapCap: 0.18,
+    }).effectiveMaxOpacity,
+    0.18,
+  );
+  assert.equal(
+    computeShapeEffectiveMaxOpacity({
+      shapeBox,
+      textRects: overlappingText,
+      configMaxOpacity: 0.22,
+      overlapCap: 0.18,
+    }).effectiveMaxOpacity,
+    0.18,
+  );
+
+  // Leaf node selection avoids overlapping text rows
+  const selectedLeaves = selectNonOverlappingLitLeafNodes({
+    anchorX: 0.72,
+    anchorY: 0.5,
+    scale: 0.42,
+    viewportWidth: 1280,
+    viewportHeight: 800,
+    textRowRects: [],
+    litLeafCount: 3,
+  });
+  assert.equal(selectedLeaves.length, 3);
+});
+
+

@@ -1,4 +1,11 @@
-import { SITE_CONFIG, type QualityTierName } from './config';
+import {
+  SITE_CONFIG,
+  type MorphStateName,
+  type QualityTierName,
+  type SectionId,
+} from './config';
+
+export type { MorphStateName };
 
 export interface DeviceProfile {
   isMobile: boolean;
@@ -743,3 +750,963 @@ export function updateParticlesForScroll(
 
   return { lineOpacityScale, idleMotionScale: idleScale };
 }
+
+/**
+ * Determines whether section-arrival animations must be completely disabled
+ * (Plain view, prefers-reduced-motion, "low" quality tier, Save-Data mode, or print).
+ */
+export function shouldDisableSectionReveal(params: {
+  plainView: boolean;
+  prefersReducedMotion: boolean;
+  qualityTier: QualityTierName;
+  saveData: boolean;
+  isPrint?: boolean;
+}): boolean {
+  return Boolean(
+    params.plainView ||
+      params.prefersReducedMotion ||
+      params.qualityTier === 'low' ||
+      params.saveData ||
+      params.isPrint,
+  );
+}
+
+/**
+ * Computes the stagger delay in milliseconds for an ordered element inside a section,
+ * capped at `staggerCap` items (indices 0..staggerCap-1) so the entire section
+ * completes in under ~900 ms.
+ */
+export function computeRevealStaggerDelayMs(
+  itemIndex: number,
+  staggerMs: number = SITE_CONFIG.sectionReveal.staggerMs,
+  staggerCap: number = SITE_CONFIG.sectionReveal.staggerCap,
+): number {
+  const safeCap = Math.max(1, Math.floor(staggerCap));
+  const clampedIndex = Math.max(0, Math.min(Math.floor(itemIndex), safeCap - 1));
+  return clampedIndex * Math.max(0, staggerMs);
+}
+
+/**
+ * Resolves a URL hash (e.g. "#Connect", "#connect", "#Projects") case-insensitively
+ * to one of the portfolio's non-hero SectionIds, or null if none matches.
+ */
+export function resolveInitialHashSectionId(hash: string): SectionId | null {
+  if (!hash) return null;
+  const cleaned = hash.replace(/^#/, '').trim().toLowerCase();
+  if (!cleaned) return null;
+  for (const sec of SITE_CONFIG.sections) {
+    if (sec.id !== 'home' && sec.id.toLowerCase() === cleaned) {
+      return sec.id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Pure decision function for whether a section should trigger its arrival animation.
+ * - Plays at most ONCE (`alreadyRevealed` returns false).
+ * - Requires at least `intersectionThreshold` (25%) of the section to be in view.
+ * - Suppresses sections passed in transit during a programmatic nav `scrollTo`.
+ * - Requires scroll velocity to have settled below `velocityThreshold` for `settleDurationMs`
+ *   (or slow scrolling where velocity has remained below threshold).
+ */
+export function shouldTriggerSectionArrival(params: {
+  sectionId: SectionId;
+  alreadyRevealed: boolean;
+  isIntersecting: boolean;
+  intersectionRatio: number;
+  inTransitTargetId: SectionId | null;
+  isVelocitySettled: boolean;
+  intersectionThreshold?: number;
+}): boolean {
+  if (params.alreadyRevealed) return false;
+  if (!params.isIntersecting) return false;
+  const threshold =
+    params.intersectionThreshold ?? SITE_CONFIG.sectionReveal.intersectionThreshold;
+  if (params.intersectionRatio < threshold) return false;
+  if (
+    params.inTransitTargetId !== null &&
+    params.inTransitTargetId !== params.sectionId
+  ) {
+    return false;
+  }
+  return params.isVelocitySettled;
+}
+
+/**
+ * Determines whether particle morph shapes must be disabled:
+ * - Plain view is active
+ * - `prefers-reduced-motion` is enabled
+ * - Quality tier is `low`
+ * - Save-Data mode is enabled
+ * - Viewport width is `< 768px` and `MORPH_ON_MOBILE` is `false`
+ */
+export function shouldDisableMorph(params: {
+  plainView: boolean;
+  prefersReducedMotion: boolean;
+  qualityTier: QualityTierName;
+  saveData: boolean;
+  viewportWidth: number;
+  morphOnMobile?: boolean;
+}): boolean {
+  const allowMobile = params.morphOnMobile ?? SITE_CONFIG.morph.MORPH_ON_MOBILE;
+  if (
+    params.plainView ||
+    params.prefersReducedMotion ||
+    params.qualityTier === 'low' ||
+    params.saveData
+  ) {
+    return true;
+  }
+  if (params.viewportWidth < 768 && !allowMobile) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Returns the morph subset particle count for the active quality tier
+ * (`1200` on `high`, `600` on `medium`, `0` on `low` or when morphs are disabled).
+ */
+export function resolveMorphParticleCount(
+  tier: QualityTierName,
+  morphDisabled: boolean,
+): number {
+  if (morphDisabled || tier === 'low') return 0;
+  return SITE_CONFIG.morph.tierParticleCounts[tier] ?? 0;
+}
+
+export type SectionVisibilityMap = Record<
+  SectionId,
+  { isIntersecting: boolean; ratio: number }
+>;
+
+/**
+ * Creates a clean initial visibility map for all 6 portfolio sections.
+ */
+export function createInitialSectionVisibilityMap(): SectionVisibilityMap {
+  return {
+    home: { isIntersecting: true, ratio: 1 },
+    background: { isIntersecting: false, ratio: 0 },
+    skills: { isIntersecting: false, ratio: 0 },
+    projects: { isIntersecting: false, ratio: 0 },
+    writeups: { isIntersecting: false, ratio: 0 },
+    connect: { isIntersecting: false, ratio: 0 },
+  };
+}
+
+/**
+ * Pure helper that determines which section (if any) is currently the arrived section
+ * for the repeatable particle morph state machine, reusing the exact same 25% visibility
+ * + settled velocity + in-transit suppression rules as section reveal animations.
+ *
+ * Unlike one-time text reveals, leaving a section returns `null` (or the newly arrived
+ * section) so particles return to `AMBIENT` and replay the morph when re-arriving.
+ */
+export function resolveDominantArrivedSection(params: {
+  inViewMap: SectionVisibilityMap;
+  heroProgress: number;
+  pageProgress: number;
+  inTransitTargetId: SectionId | null;
+  isVelocitySettled: boolean;
+  currentArrivedSection: SectionId | null;
+  intersectionThreshold?: number;
+}): SectionId | null {
+  const threshold =
+    params.intersectionThreshold ?? SITE_CONFIG.sectionReveal.intersectionThreshold;
+
+  // 1. While a programmatic nav jump (lenis.scrollTo) is in transit, suppress intermediate
+  //    sections passed along the way so jumping Home -> Connect never flashes TOPOLOGY.
+  if (params.inTransitTargetId !== null) {
+    if (params.inTransitTargetId === 'home' && params.heroProgress < 0.35) {
+      return 'home';
+    }
+    return null;
+  }
+
+  // 2. When near the top of the page (Home), recombine into HERO immediately
+  if (
+    params.heroProgress < 0.35 &&
+    params.inViewMap.home.isIntersecting &&
+    params.inViewMap.home.ratio >= threshold
+  ) {
+    return 'home';
+  }
+
+  // 3. Collect all sections currently at least `threshold` (25%) in view
+  const qualifying: Array<{ id: SectionId; ratio: number }> = [];
+  for (const sec of SITE_CONFIG.sections) {
+    const entry = params.inViewMap[sec.id];
+    if (entry && entry.isIntersecting && entry.ratio >= threshold) {
+      qualifying.push({ id: sec.id, ratio: entry.ratio });
+    }
+  }
+
+  if (qualifying.length === 0) {
+    return null;
+  }
+
+  // Find the section with the highest visibility ratio (with bottom-of-page preference for Connect)
+  let best = qualifying[0];
+  for (let i = 1; i < qualifying.length; i++) {
+    const cand = qualifying[i];
+    if (cand.id === 'connect' && params.pageProgress >= 0.88 && cand.ratio >= threshold) {
+      best = cand;
+      break;
+    }
+    if (cand.ratio > best.ratio + 0.02) {
+      best = cand;
+    }
+  }
+
+  // 4. If a section was already arrived (`currentArrivedSection`), check if it is still in view
+  if (params.currentArrivedSection) {
+    const prevEntry = params.inViewMap[params.currentArrivedSection];
+    const stillInView =
+      prevEntry && prevEntry.isIntersecting && prevEntry.ratio >= threshold;
+    if (!stillInView) {
+      // Left the previously arrived section; if velocity is settled on a new section, arrive there, else null (AMBIENT)
+      return params.isVelocitySettled ? best.id : null;
+    }
+    // If another section now strongly dominates by > 0.22 ratio, we have scrolled out of the previous section
+    if (best.id !== params.currentArrivedSection && best.ratio > prevEntry.ratio + 0.22) {
+      return params.isVelocitySettled ? best.id : null;
+    }
+    return params.currentArrivedSection;
+  }
+
+  // 5. Entering a new section requires scrolling to have settled
+  if (!params.isVelocitySettled) {
+    return null;
+  }
+
+  return best.id;
+}
+
+export interface MorphStateStepResult {
+  state: MorphStateName;
+  stateEnteredAtMs: number;
+  dollarFormationCompleteMs: number;
+}
+
+/**
+ * Pure state machine transition function for `HERO | AMBIENT | TOPOLOGY | DOLLAR | HASH`.
+ * - `HERO`: at the top of the page (`heroProgress < 0.35` and no non-home section arrived).
+ * - `TOPOLOGY`: when `arrivedSection === 'skills'` and morphs are enabled.
+ * - `DOLLAR` -> `HASH`: when `arrivedSection === 'connect'`, glyphs are available, and morphs are enabled.
+ *   `DOLLAR` forms over `formationDurationMs`, holds for `dollarHoldMs` (~700 ms), then transitions to `HASH`
+ *   and holds `HASH` as long as `Connect` remains the arrived section.
+ * - `AMBIENT`: everywhere else (or when leaving a section, or when morphs are disabled away from Home).
+ */
+export function stepMorphStateMachine(params: {
+  currentState: MorphStateName;
+  stateEnteredAtMs: number;
+  dollarFormationCompleteMs: number;
+  nowMs: number;
+  morphDisabled: boolean;
+  heroProgress: number;
+  arrivedSection: SectionId | null;
+  glyphsAvailable: boolean;
+  formationDurationMs?: number;
+  dollarHoldMs?: number;
+}): MorphStateStepResult {
+  const formationMs =
+    params.formationDurationMs ?? SITE_CONFIG.morph.formationDurationMs;
+  const holdMs = params.dollarHoldMs ?? SITE_CONFIG.morph.dollarHoldMs;
+
+  const isAtHero =
+    params.heroProgress < 0.35 &&
+    (params.arrivedSection === 'home' || params.arrivedSection === null);
+
+  if (isAtHero) {
+    if (params.currentState === 'HERO') {
+      return {
+        state: 'HERO',
+        stateEnteredAtMs: params.stateEnteredAtMs,
+        dollarFormationCompleteMs: 0,
+      };
+    }
+    return {
+      state: 'HERO',
+      stateEnteredAtMs: params.nowMs,
+      dollarFormationCompleteMs: 0,
+    };
+  }
+
+  if (params.morphDisabled) {
+    if (params.currentState === 'AMBIENT') {
+      return {
+        state: 'AMBIENT',
+        stateEnteredAtMs: params.stateEnteredAtMs,
+        dollarFormationCompleteMs: 0,
+      };
+    }
+    return {
+      state: 'AMBIENT',
+      stateEnteredAtMs: params.nowMs,
+      dollarFormationCompleteMs: 0,
+    };
+  }
+
+  if (params.arrivedSection === 'skills') {
+    if (params.currentState === 'TOPOLOGY') {
+      return {
+        state: 'TOPOLOGY',
+        stateEnteredAtMs: params.stateEnteredAtMs,
+        dollarFormationCompleteMs: 0,
+      };
+    }
+    return {
+      state: 'TOPOLOGY',
+      stateEnteredAtMs: params.nowMs,
+      dollarFormationCompleteMs: 0,
+    };
+  }
+
+  if (params.arrivedSection === 'connect' && params.glyphsAvailable) {
+    if (params.currentState === 'HASH') {
+      return {
+        state: 'HASH',
+        stateEnteredAtMs: params.stateEnteredAtMs,
+        dollarFormationCompleteMs: params.dollarFormationCompleteMs,
+      };
+    }
+    if (params.currentState === 'DOLLAR') {
+      const switchToHashAtMs = params.dollarFormationCompleteMs + holdMs;
+      if (params.nowMs >= switchToHashAtMs) {
+        return {
+          state: 'HASH',
+          stateEnteredAtMs: params.nowMs,
+          dollarFormationCompleteMs: params.dollarFormationCompleteMs,
+        };
+      }
+      return {
+        state: 'DOLLAR',
+        stateEnteredAtMs: params.stateEnteredAtMs,
+        dollarFormationCompleteMs: params.dollarFormationCompleteMs,
+      };
+    }
+    // Just arrived at Connect: enter DOLLAR
+    return {
+      state: 'DOLLAR',
+      stateEnteredAtMs: params.nowMs,
+      dollarFormationCompleteMs: params.nowMs + formationMs,
+    };
+  }
+
+  if (params.currentState === 'AMBIENT') {
+    return {
+      state: 'AMBIENT',
+      stateEnteredAtMs: params.stateEnteredAtMs,
+      dollarFormationCompleteMs: 0,
+    };
+  }
+  return {
+    state: 'AMBIENT',
+    stateEnteredAtMs: params.nowMs,
+    dollarFormationCompleteMs: 0,
+  };
+}
+
+export interface TopologyTargetData {
+  /** Normalized positions in [-0.5, +0.5] for each morph particle (length = count * 3) */
+  normalizedPositions: Float32Array;
+  /** Which topology node index (0..14) each particle belongs to (length = count) */
+  nodeAssignments: Uint8Array;
+  /** Number of particles assigned to each topology node (length = nodeCount) */
+  nodeParticleCounts: Uint16Array;
+  /** Bounding box in normalized shape space [-0.5, +0.5] */
+  bounds: { minX: number; maxX: number; minY: number; maxY: number };
+}
+
+/**
+ * Generates deterministic hub-and-spoke network topology cluster targets from
+ * the hand-authored node coordinates in `SITE_CONFIG.morph.topology`.
+ */
+export function generateTopologyTargets(
+  count: number,
+  seed = 303,
+): TopologyTargetData {
+  const rand = createSeededRandom(seed);
+  const nodes = SITE_CONFIG.morph.topology.nodes;
+  const nodeCount = nodes.length;
+
+  const normalizedPositions = new Float32Array(count * 3);
+  const nodeAssignments = new Uint8Array(count);
+  const nodeParticleCounts = new Uint16Array(nodeCount);
+
+  // Weight distribution: gateway gets ~14%, each subhub gets ~9%, each leaf gets ~5.3%
+  const weights: number[] = nodes.map((n) =>
+    n.role === 'gateway' ? 2.6 : n.role === 'subhub' ? 1.7 : 1.0,
+  );
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const cumulative: number[] = [];
+  let acc = 0;
+  for (let i = 0; i < nodeCount; i++) {
+    acc += weights[i] / totalWeight;
+    cumulative.push(acc);
+  }
+
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  for (let i = 0; i < count; i++) {
+    // First `nodeCount` particles sit exactly at the node centers so every cluster is anchored
+    let nodeIdx = i < nodeCount ? i : nodeCount - 1;
+    if (i >= nodeCount) {
+      const u = (i - nodeCount + 0.5) / Math.max(1, count - nodeCount);
+      for (let n = 0; n < nodeCount; n++) {
+        if (u <= cumulative[n]) {
+          nodeIdx = n;
+          break;
+        }
+      }
+    }
+
+    const host = nodes[nodeIdx];
+    nodeAssignments[i] = nodeIdx;
+    nodeParticleCounts[nodeIdx] += 1;
+
+    // Tight dense cluster around the host node
+    const r = i < nodeCount ? 0 : Math.pow(rand(), 0.65) * host.radius;
+    const theta = rand() * Math.PI * 2;
+    const zJitter = (rand() - 0.5) * host.radius * 0.7;
+
+    const px = host.x + Math.cos(theta) * r;
+    const py = host.y + Math.sin(theta) * r;
+    const pz = host.z + zJitter;
+
+    const i3 = i * 3;
+    normalizedPositions[i3] = px;
+    normalizedPositions[i3 + 1] = py;
+    normalizedPositions[i3 + 2] = pz;
+
+    if (px < minX) minX = px;
+    if (px > maxX) maxX = px;
+    if (py < minY) minY = py;
+    if (py > maxY) maxY = py;
+  }
+
+  if (!Number.isFinite(minX)) {
+    minX = -0.45;
+    maxX = 0.45;
+    minY = -0.45;
+    maxY = 0.45;
+  }
+
+  return {
+    normalizedPositions,
+    nodeAssignments,
+    nodeParticleCounts,
+    bounds: { minX, maxX, minY, maxY },
+  };
+}
+
+/**
+ * Computes the per-node cyan highlight factor in [0, 1] for each topology node on arrival.
+ * The 3 chosen leaf nodes light up cyan (`#4FD1D9`) one after another `intervalMs` (~400 ms)
+ * apart like open ports found by a scan, while all other nodes stay 0 (dim off-white).
+ */
+export function computeTopologyNodePortScanIntensities(
+  nodeCount: number,
+  elapsedInTopologyMs: number,
+  litLeafIndices: readonly number[],
+  intervalMs: number = SITE_CONFIG.morph.topologyPortScanIntervalMs,
+): Float32Array {
+  const intensities = new Float32Array(nodeCount);
+  const rampDurationMs = 240;
+
+  for (let s = 0; s < litLeafIndices.length; s++) {
+    const nodeIdx = litLeafIndices[s];
+    if (nodeIdx < 0 || nodeIdx >= nodeCount) continue;
+    // Port 0 lights at 1 * intervalMs (400ms), Port 1 at 800ms, Port 2 at 1200ms
+    const startMs = (s + 1) * intervalMs;
+    if (elapsedInTopologyMs <= startMs) {
+      intensities[nodeIdx] = 0;
+    } else {
+      const raw = (elapsedInTopologyMs - startMs) / rampDurationMs;
+      const clamped = Math.max(0, Math.min(1, raw));
+      intensities[nodeIdx] = clamped * clamped * (3 - 2 * clamped);
+    }
+  }
+
+  return intensities;
+}
+
+/**
+ * Computes the smooth colour and target interpolation factor in [0, 1] when morphing
+ * from `DOLLAR` ("$", cyan) to `HASH` ("#", amber) over `hashMorphDurationMs` (~1,000 ms).
+ */
+export function computeHashMorphProgress(
+  elapsedInHashMs: number,
+  durationMs: number = SITE_CONFIG.morph.hashMorphDurationMs,
+): number {
+  const safeDuration = Math.max(1, durationMs);
+  const t = Math.max(0, Math.min(1, elapsedInHashMs / safeDuration));
+  // Cubic ease-out
+  return 1 - Math.pow(1 - t, 3);
+}
+
+export interface GlyphPairTargetData {
+  /** Normalized positions in [-0.5, +0.5] for "$" (length = count * 3) */
+  dollarPositions: Float32Array;
+  /** Normalized positions in [-0.5, +0.5] for "#" ordered 1-to-1 by nearest neighbour to dollarPositions (length = count * 3) */
+  hashPositions: Float32Array;
+  /** Normalized bounding box covering both glyphs */
+  bounds: { minX: number; maxX: number; minY: number; maxY: number };
+}
+
+/**
+ * Given binary/alpha pixel buffers (`Uint8ClampedArray` RGBA of size `width * height * 4`)
+ * for two glyphs ("$" and "#"), samples `count` filled pixels on a jittered grid for each
+ * glyph (normalizing height to `[-0.5, +0.5]`) and orders the "#" points by nearest-neighbour
+ * matching (plus 2-opt untangling passes) so "$" maps 1-to-1 onto "#" without tangling.
+ *
+ * Returns `null` if either buffer has too few filled pixels.
+ */
+export function sampleAndMatchGlyphPairFromRgba(options: {
+  dollarRgba: Uint8ClampedArray | Uint8Array;
+  hashRgba: Uint8ClampedArray | Uint8Array;
+  width: number;
+  height: number;
+  count: number;
+  seed?: number;
+}): GlyphPairTargetData | null {
+  const { dollarRgba, hashRgba, width, height, count } = options;
+  if (count <= 0 || width <= 0 || height <= 0) return null;
+
+  const rand = createSeededRandom(options.seed ?? 909);
+
+  const extractNormalizedPoints = (
+    rgba: Uint8ClampedArray | Uint8Array,
+  ): Float32Array | null => {
+    const filledX: number[] = [];
+    const filledY: number[] = [];
+    let minX = width;
+    let maxX = 0;
+    let minY = height;
+    let maxY = 0;
+
+    for (let y = 0; y < height; y++) {
+      const rowOffset = y * width * 4;
+      for (let x = 0; x < width; x++) {
+        const alpha = rgba[rowOffset + x * 4 + 3];
+        if (alpha > 110) {
+          filledX.push(x);
+          filledY.push(y);
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    const totalFilled = filledX.length;
+    if (totalFilled < 20) return null;
+
+    const spanY = Math.max(8, maxY - minY);
+    const centerX = (minX + maxX) * 0.5;
+    const centerY = (minY + maxY) * 0.5;
+
+    // Sample on a jittered grid across the filled ink pixels
+    const gridStep = Math.max(1, Math.floor(Math.sqrt(totalFilled / count)));
+    const candidates: Array<{ x: number; y: number }> = [];
+
+    for (let y = minY; y <= maxY; y += gridStep) {
+      for (let x = minX; x <= maxX; x += gridStep) {
+        const jx = Math.min(
+          width - 1,
+          Math.max(0, Math.round(x + (rand() - 0.5) * gridStep)),
+        );
+        const jy = Math.min(
+          height - 1,
+          Math.max(0, Math.round(y + (rand() - 0.5) * gridStep)),
+        );
+        if (rgba[(jy * width + jx) * 4 + 3] > 110) {
+          const nx = (jx - centerX + (rand() - 0.5) * 0.85) / spanY;
+          const ny = (centerY - jy + (rand() - 0.5) * 0.85) / spanY;
+          candidates.push({ x: nx, y: ny });
+        }
+      }
+    }
+
+    const out = new Float32Array(count * 3);
+    if (candidates.length >= count) {
+      // Pick `count` evenly spaced points across the jittered grid candidates
+      for (let i = 0; i < count; i++) {
+        const idx = Math.min(
+          candidates.length - 1,
+          Math.floor(((i + 0.5) * candidates.length) / count),
+        );
+        const pt = candidates[idx];
+        out[i * 3] = pt.x;
+        out[i * 3 + 1] = pt.y;
+        out[i * 3 + 2] = (rand() - 0.5) * 0.018;
+      }
+    } else {
+      // Copy all grid candidates first, then fill remainder from filled pixels with sub-pixel jitter
+      let cursor = 0;
+      for (; cursor < candidates.length && cursor < count; cursor++) {
+        out[cursor * 3] = candidates[cursor].x;
+        out[cursor * 3 + 1] = candidates[cursor].y;
+        out[cursor * 3 + 2] = (rand() - 0.5) * 0.018;
+      }
+      for (; cursor < count; cursor++) {
+        const pick = Math.floor(rand() * totalFilled);
+        const nx = (filledX[pick] - centerX + (rand() - 0.5) * 0.95) / spanY;
+        const ny = (centerY - filledY[pick] + (rand() - 0.5) * 0.95) / spanY;
+        out[cursor * 3] = nx;
+        out[cursor * 3 + 1] = ny;
+        out[cursor * 3 + 2] = (rand() - 0.5) * 0.018;
+      }
+    }
+
+    return out;
+  };
+
+  const dollarPts = extractNormalizedPoints(dollarRgba);
+  const rawHashPts = extractNormalizedPoints(hashRgba);
+  if (!dollarPts || !rawHashPts) return null;
+
+  // Order dollarPts from outer periphery inward so outer contour points claim nearest neighbours first
+  const dollarOrder = Array.from({ length: count }, (_, i) => i);
+  dollarOrder.sort((a, b) => {
+    const ra =
+      dollarPts[a * 3] * dollarPts[a * 3] +
+      dollarPts[a * 3 + 1] * dollarPts[a * 3 + 1];
+    const rb =
+      dollarPts[b * 3] * dollarPts[b * 3] +
+      dollarPts[b * 3 + 1] * dollarPts[b * 3 + 1];
+    return rb - ra;
+  });
+
+  // 1-to-1 greedy nearest-neighbour assignment from dollarPts to rawHashPts
+  const usedHash = new Uint8Array(count);
+  const matchedHashIdx = new Int32Array(count);
+
+  for (let k = 0; k < count; k++) {
+    const dIdx = dollarOrder[k];
+    const dx = dollarPts[dIdx * 3];
+    const dy = dollarPts[dIdx * 3 + 1];
+
+    let bestH = -1;
+    let bestDistSq = Infinity;
+    for (let h = 0; h < count; h++) {
+      if (usedHash[h]) continue;
+      const hx = rawHashPts[h * 3] - dx;
+      const hy = rawHashPts[h * 3 + 1] - dy;
+      const dSq = hx * hx + hy * hy;
+      if (dSq < bestDistSq) {
+        bestDistSq = dSq;
+        bestH = h;
+      }
+    }
+    if (bestH < 0) bestH = 0;
+    usedHash[bestH] = 1;
+    matchedHashIdx[dIdx] = bestH;
+  }
+
+  // Local 2-opt swap pass to untangle any crossing trajectories
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < count; i++) {
+      const j = (i * 73 + 19) % count;
+      if (i === j) continue;
+      const hi = matchedHashIdx[i];
+      const hj = matchedHashIdx[j];
+
+      const dix = dollarPts[i * 3];
+      const diy = dollarPts[i * 3 + 1];
+      const djx = dollarPts[j * 3];
+      const djy = dollarPts[j * 3 + 1];
+
+      const hix = rawHashPts[hi * 3];
+      const hiy = rawHashPts[hi * 3 + 1];
+      const hjx = rawHashPts[hj * 3];
+      const hjy = rawHashPts[hj * 3 + 1];
+
+      const curCost =
+        (dix - hix) * (dix - hix) +
+        (diy - hiy) * (diy - hiy) +
+        (djx - hjx) * (djx - hjx) +
+        (djy - hjy) * (djy - hjy);
+      const swapCost =
+        (dix - hjx) * (dix - hjx) +
+        (diy - hjy) * (diy - hjy) +
+        (djx - hix) * (djx - hix) +
+        (djy - hiy) * (djy - hiy);
+
+      if (swapCost < curCost) {
+        matchedHashIdx[i] = hj;
+        matchedHashIdx[j] = hi;
+      }
+    }
+  }
+
+  const hashPositions = new Float32Array(count * 3);
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  for (let i = 0; i < count; i++) {
+    const hIdx = matchedHashIdx[i];
+    const i3 = i * 3;
+    const h3 = hIdx * 3;
+    hashPositions[i3] = rawHashPts[h3];
+    hashPositions[i3 + 1] = rawHashPts[h3 + 1];
+    hashPositions[i3 + 2] = rawHashPts[h3 + 2];
+
+    const dx = dollarPts[i3];
+    const dy = dollarPts[i3 + 1];
+    const hx = hashPositions[i3];
+    const hy = hashPositions[i3 + 1];
+
+    if (dx < minX) minX = dx;
+    if (dx > maxX) maxX = dx;
+    if (dy < minY) minY = dy;
+    if (dy > maxY) maxY = dy;
+    if (hx < minX) minX = hx;
+    if (hx > maxX) maxX = hx;
+    if (hy < minY) minY = hy;
+    if (hy > maxY) maxY = hy;
+  }
+
+  return {
+    dollarPositions: dollarPts,
+    hashPositions,
+    bounds: { minX, maxX, minY, maxY },
+  };
+}
+
+/**
+ * Rasterises the "$" and "#" glyphs to an offscreen `<canvas>` after `document.fonts.ready`
+ * using the loaded `JetBrains Mono` bold font, and produces 1-to-1 nearest-neighbour
+ * matched particle targets. Returns `null` if canvas rasterising fails so the Connect
+ * morph can be skipped silently.
+ */
+export async function rasterizePairGlyphTargets(
+  count: number,
+  seed = 909,
+): Promise<GlyphPairTargetData | null> {
+  if (count <= 0 || typeof document === 'undefined') return null;
+
+  try {
+    if (document.fonts && document.fonts.ready) {
+      await document.fonts.ready;
+    }
+  } catch {
+    // Continue even if document.fonts rejects
+  }
+
+  try {
+    const size = SITE_CONFIG.morph.glyph.canvasSize;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+
+    const renderGlyphRgba = (char: string): Uint8ClampedArray | null => {
+      ctx.clearRect(0, 0, size, size);
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `${SITE_CONFIG.morph.glyph.fontWeight} ${Math.round(size * 0.78)}px "${SITE_CONFIG.morph.glyph.fontFamily}", monospace`;
+      ctx.fillText(char, size * 0.5, size * 0.52);
+      const img = ctx.getImageData(0, 0, size, size);
+      return img.data;
+    };
+
+    const dollarRgba = renderGlyphRgba(SITE_CONFIG.morph.glyph.dollarChar);
+    const hashRgba = renderGlyphRgba(SITE_CONFIG.morph.glyph.hashChar);
+    if (!dollarRgba || !hashRgba) return null;
+
+    return sampleAndMatchGlyphPairFromRgba({
+      dollarRgba,
+      hashRgba,
+      width: size,
+      height: size,
+      count,
+      seed,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Steps a `Float32Array` of 3D particle positions and velocities toward `targetPos`
+ * using an exact analytical critically damped spring:
+ *   x(t + dt) = target + (d0 + (v0 + omega * d0) * dt) * exp(-omega * dt)
+ *   v(t + dt) = (v0 - (v0 + omega * d0) * omega * dt) * exp(-omega * dt)
+ *
+ * Unconditionally stable for any `dt`, never overshoots or snaps on mid-flight retargeting,
+ * and updates 1,200 particles (3,600 floats) in ~0.03 ms per frame.
+ * Returns the maximum squared displacement from target across all particles.
+ */
+export function stepCriticallyDampedSpringBuffer(
+  curPos: Float32Array,
+  vel: Float32Array,
+  targetPos: Float32Array,
+  dtSec: number,
+  omega: number = SITE_CONFIG.morph.springOmega,
+): number {
+  const len = Math.min(curPos.length, vel.length, targetPos.length);
+  const safeDt = Math.max(0.0005, Math.min(0.1, dtSec));
+  const w = Math.max(0.1, omega);
+  const expTerm = Math.exp(-w * safeDt);
+  let maxDistSq = 0;
+
+  for (let i = 0; i < len; i++) {
+    const target = targetPos[i];
+    const d0 = curPos[i] - target;
+    const v0 = vel[i];
+    const temp = v0 + w * d0;
+    const d1 = (d0 + temp * safeDt) * expTerm;
+    const v1 = (v0 - temp * w * safeDt) * expTerm;
+
+    curPos[i] = target + d1;
+    vel[i] = v1;
+
+    const dSq = d1 * d1;
+    if (dSq > maxDistSq) {
+      maxDistSq = dSq;
+    }
+  }
+
+  return maxDistSq;
+}
+
+export interface ScreenBoxRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/**
+ * Returns true if two screen-space bounding boxes overlap.
+ */
+export function doScreenBoxesOverlap(a: ScreenBoxRect, b: ScreenBoxRect): boolean {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+/**
+ * Computes the screen-space bounding box of a morph shape from its normalized bounds
+ * and per-shape config (`anchorX`, `anchorY`, `scale`).
+ */
+export function computeShapeScreenBoundingBox(options: {
+  anchorX: number;
+  anchorY: number;
+  scale: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  bounds: { minX: number; maxX: number; minY: number; maxY: number };
+}): ScreenBoxRect {
+  const centerX = options.anchorX * options.viewportWidth;
+  const centerY = options.anchorY * options.viewportHeight;
+  const spanPx = options.scale * options.viewportHeight;
+
+  return {
+    left: centerX + options.bounds.minX * spanPx,
+    right: centerX + options.bounds.maxX * spanPx,
+    // In normalized shape space +Y is up, while in screen space +Y is down
+    top: centerY - options.bounds.maxY * spanPx,
+    bottom: centerY - options.bounds.minY * spanPx,
+  };
+}
+
+/**
+ * Runtime readability helper: if a morph shape's screen-space bounding box overlaps
+ * any text block bounding box in the active section on desktop, caps its opacity to
+ * `overlapCap` (`<= 0.18`).
+ */
+export function computeShapeEffectiveMaxOpacity(options: {
+  shapeBox: ScreenBoxRect;
+  textRects: readonly ScreenBoxRect[];
+  configMaxOpacity: number;
+  overlapCap?: number;
+}): { effectiveMaxOpacity: number; overlapsText: boolean } {
+  const cap = options.overlapCap ?? SITE_CONFIG.morph.overlapMaxOpacityCap;
+  for (let i = 0; i < options.textRects.length; i++) {
+    const r = options.textRects[i];
+    if (r.right - r.left <= 0 || r.bottom - r.top <= 0) continue;
+    if (doScreenBoxesOverlap(options.shapeBox, r)) {
+      return {
+        effectiveMaxOpacity: Math.min(options.configMaxOpacity, cap),
+        overlapsText: true,
+      };
+    }
+  }
+  return {
+    effectiveMaxOpacity: options.configMaxOpacity,
+    overlapsText: false,
+  };
+}
+
+/**
+ * Picks up to `litLeafCount` (3) leaf node indices for the topology port-scan animation,
+ * keeping lit nodes off text rows by filtering out any leaf node whose screen-space disc
+ * overlaps a text row bounding box in the Skills section.
+ */
+export function selectNonOverlappingLitLeafNodes(options: {
+  anchorX: number;
+  anchorY: number;
+  scale: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  textRowRects: readonly ScreenBoxRect[];
+  litLeafCount?: number;
+}): number[] {
+  const countWanted = options.litLeafCount ?? SITE_CONFIG.morph.topology.litLeafCount;
+  const nodes = SITE_CONFIG.morph.topology.nodes;
+  const preferred = SITE_CONFIG.morph.topology.preferredLitLeafNodeIndices;
+
+  const centerX = options.anchorX * options.viewportWidth;
+  const centerY = options.anchorY * options.viewportHeight;
+  const spanPx = options.scale * options.viewportHeight;
+
+  const isNodeClearOfTextRows = (nodeIdx: number): boolean => {
+    const node = nodes[nodeIdx];
+    if (!node || node.role !== 'leaf') return false;
+    const nx = centerX + node.x * spanPx;
+    const ny = centerY - node.y * spanPx;
+    const rPx = Math.max(8, node.radius * spanPx);
+    const nodeBox: ScreenBoxRect = {
+      left: nx - rPx,
+      right: nx + rPx,
+      top: ny - rPx,
+      bottom: ny + rPx,
+    };
+    for (let i = 0; i < options.textRowRects.length; i++) {
+      if (doScreenBoxesOverlap(nodeBox, options.textRowRects[i])) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const chosen: number[] = [];
+  for (const idx of preferred) {
+    if (chosen.length >= countWanted) break;
+    if (isNodeClearOfTextRows(idx)) {
+      chosen.push(idx);
+    }
+  }
+
+  if (chosen.length < countWanted) {
+    for (let i = 0; i < nodes.length; i++) {
+      if (chosen.length >= countWanted) break;
+      if (nodes[i].role === 'leaf' && !chosen.includes(i) && isNodeClearOfTextRows(i)) {
+        chosen.push(i);
+      }
+    }
+  }
+
+  return chosen;
+}
+
+

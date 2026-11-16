@@ -313,9 +313,127 @@ export const SITE_CONFIG = {
     // Total forward depth travel (along -Z) of the camera from Home (top) to Connect (bottom)
     cameraTravelDepth: 18.0,
   },
+
+  // Section-arrival reveal animation configuration (home page sections after Hero only)
+  sectionReveal: {
+    // Fade and translateY duration in milliseconds
+    durationMs: 500,
+    // CSS timing function for section-arrival transitions
+    easing: 'ease-out',
+    // Vertical upward translation distance in pixels (12px -> 0px)
+    translateYDistancePx: 12,
+    // Stagger step between ordered elements inside a section in milliseconds
+    staggerMs: 40,
+    // Maximum number of staggered items per section so total reveal finishes under ~900ms
+    staggerCap: 8,
+    // Minimum fraction of a section that must be in view to count as arrived (25%)
+    intersectionThreshold: 0.25,
+    // Maximum |lenis.velocity| treated as settled / slow scrolling
+    velocityThreshold: 1.5,
+    // Time in milliseconds velocity must remain below velocityThreshold to count as settled
+    settleDurationMs: 120,
+    // Failsafe timeout in milliseconds after reaching 25% visibility to force reveal
+    failsafeTimeoutMs: 3000,
+  },
+
+  // Particle morph system configuration (HERO -> AMBIENT -> TOPOLOGY / DOLLAR -> HASH)
+  morph: {
+    // Under 768px width, morphs are off by default; particles stay ambient
+    MORPH_ON_MOBILE: false,
+    // Morph subset particle counts per quality tier (shared pool)
+    tierParticleCounts: {
+      high: 1200,
+      medium: 600,
+      low: 0,
+    },
+    // Formation duration in milliseconds (~1,000 to 1,400 ms ease-out)
+    formationDurationMs: 1150,
+    // Critically damped spring angular frequency (rad/s) for smooth retargeting without overshoot
+    springOmega: 4.6,
+    hashSpringOmega: 5.2,
+    // Hold time in milliseconds for the "$" glyph after formation before morphing to "#"
+    dollarHoldMs: 700,
+    // Duration in milliseconds for "$" -> "#" morph and cyan (#4FD1D9) -> amber (#E8A33D) colour lerp
+    hashMorphDurationMs: 1000,
+    // Interval in milliseconds between the 3 leaf nodes lighting up cyan (#4FD1D9) on Skills arrival
+    topologyPortScanIntervalMs: 400,
+    // Runtime readability opacity cap if a shape's bounding box overlaps a text block on desktop
+    overlapMaxOpacityCap: 0.18,
+
+    // Skills section: Hub-and-spoke network topology (1 gateway hub, 3 sub-hubs, 11 leaf hosts)
+    topology: {
+      anchorX: 0.72,
+      anchorY: 0.5,
+      scale: 0.42,
+      maxOpacity: 0.22,
+      litLeafCount: 3,
+      preferredLitLeafNodeIndices: [4, 9, 13] as const,
+      // Coordinates in normalized shape space [-0.5, +0.5]
+      nodes: [
+        // 0: Gateway hub (center)
+        { id: 0, role: 'gateway', x: 0.0, y: 0.0, z: 0.0, radius: 0.034 },
+        // 1..3: 3 Sub-hubs
+        { id: 1, role: 'subhub', x: -0.17, y: 0.18, z: 0.02, radius: 0.026 },
+        { id: 2, role: 'subhub', x: 0.21, y: 0.12, z: -0.02, radius: 0.026 },
+        { id: 3, role: 'subhub', x: 0.04, y: -0.22, z: 0.015, radius: 0.026 },
+        // 4..14: 11 Leaf hosts (connected to sub-hubs 1, 2, 3)
+        { id: 4, role: 'leaf', x: -0.08, y: 0.43, z: 0.01, radius: 0.02 },
+        { id: 5, role: 'leaf', x: -0.35, y: 0.33, z: -0.02, radius: 0.02 },
+        { id: 6, role: 'leaf', x: -0.39, y: 0.08, z: 0.025, radius: 0.02 },
+        { id: 7, role: 'leaf', x: 0.16, y: 0.41, z: -0.015, radius: 0.02 },
+        { id: 8, role: 'leaf', x: 0.40, y: 0.30, z: 0.02, radius: 0.02 },
+        { id: 9, role: 'leaf', x: 0.46, y: 0.07, z: -0.02, radius: 0.02 },
+        { id: 10, role: 'leaf', x: 0.37, y: -0.11, z: 0.015, radius: 0.02 },
+        { id: 11, role: 'leaf', x: -0.24, y: -0.32, z: -0.02, radius: 0.02 },
+        { id: 12, role: 'leaf', x: -0.07, y: -0.45, z: 0.02, radius: 0.02 },
+        { id: 13, role: 'leaf', x: 0.20, y: -0.42, z: -0.015, radius: 0.02 },
+        { id: 14, role: 'leaf', x: 0.35, y: -0.27, z: 0.02, radius: 0.02 },
+      ] as const,
+      // Hand-authored undirected edges [nodeA, nodeB]
+      edges: [
+        // Gateway to 3 sub-hubs
+        [0, 1],
+        [0, 2],
+        [0, 3],
+        // Sub-hub ring links
+        [1, 2],
+        [2, 3],
+        // Sub-hub 1 to leaves 4..6
+        [1, 4],
+        [1, 5],
+        [1, 6],
+        // Sub-hub 2 to leaves 7..10
+        [2, 7],
+        [2, 8],
+        [2, 9],
+        [2, 10],
+        // Sub-hub 3 to leaves 11..14
+        [3, 11],
+        [3, 12],
+        [3, 13],
+        [3, 14],
+      ] as const,
+    },
+
+    // Connect section: "$" -> "#" privilege escalation glyph morph
+    glyph: {
+      anchorX: 0.78,
+      anchorY: 0.5,
+      // Glyph height is ~40% of the viewport height
+      scale: 0.4,
+      maxOpacity: 0.9,
+      dollarChar: '$',
+      hashChar: '#',
+      fontFamily: 'JetBrains Mono',
+      fontWeight: '700',
+      canvasSize: 256,
+    },
+  },
 } as const;
 
 export type SiteConfig = typeof SITE_CONFIG;
 export type SectionId = (typeof SITE_CONFIG.sections)[number]['id'];
 export type QualityTierName = keyof typeof SITE_CONFIG.qualityTiers.tiers;
+export type MorphStateName = 'HERO' | 'AMBIENT' | 'TOPOLOGY' | 'DOLLAR' | 'HASH';
+
 
