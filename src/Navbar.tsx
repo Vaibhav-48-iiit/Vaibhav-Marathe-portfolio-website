@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { SITE_CONFIG, type SectionId } from './config';
+import { SITE_CONFIG, type SectionId, type ThemeMode } from './config';
+import { getTheme, subscribeTheme, toggleTheme } from './themeStore';
 
 interface NavbarProps {
   activeSection: SectionId;
@@ -9,14 +10,93 @@ interface NavbarProps {
   onTogglePlainView: () => void;
   soundMuted?: boolean;
   onToggleSoundMuted?: () => void;
+  introActive?: boolean;
   onSelectSection: (id: SectionId) => void;
+}
+
+/**
+ * Isolated theme toggle button at the far right of the top bar.
+ * Updates `data-theme` on `<html>` and notifies the 3D scene via `themeStore`
+ * without re-rendering `AppShell`, `HomeView`, `PortfolioSections`, or `DeltaScene`.
+ */
+function ThemeToggleButton() {
+  const [theme, setThemeState] = useState<ThemeMode>(() => getTheme());
+
+  useEffect(() => {
+    setThemeState(getTheme());
+    return subscribeTheme((nextTheme) => {
+      setThemeState(nextTheme);
+    });
+  }, []);
+
+  const isLight = theme === 'light';
+  const ariaLabel = isLight ? 'Switch to dark theme' : 'Switch to light theme';
+
+  return (
+    <button
+      type="button"
+      data-testid="theme-toggle-button"
+      aria-label={ariaLabel}
+      aria-pressed={isLight}
+      onClick={() => {
+        toggleTheme();
+      }}
+      className={`cursor-pointer inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded border px-2 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] ${
+        isLight
+          ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
+          : 'border-[var(--border-subtle)] bg-[var(--bg)] text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--text-primary)]'
+      }`}
+    >
+      {isLight ? (
+        /* Monochrome 18px inline SVG Moon icon (drawn with currentColor) */
+        <svg
+          aria-hidden="true"
+          width={18}
+          height={18}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.75}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="h-[18px] w-[18px] shrink-0"
+        >
+          <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+        </svg>
+      ) : (
+        /* Monochrome 18px inline SVG Sun icon (drawn with currentColor) */
+        <svg
+          aria-hidden="true"
+          width={18}
+          height={18}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.75}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="h-[18px] w-[18px] shrink-0"
+        >
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2" />
+          <path d="M12 20v2" />
+          <path d="m4.93 4.93 1.41 1.41" />
+          <path d="m17.66 17.66 1.41 1.41" />
+          <path d="M2 12h2" />
+          <path d="M20 12h2" />
+          <path d="m6.34 17.66-1.41 1.41" />
+          <path d="m19.07 4.93-1.41 1.41" />
+        </svg>
+      )}
+    </button>
+  );
 }
 
 /**
  * Persistent slim top navigation bar.
  * - Left: "Δ vaibhav.marathe" + whole-page "depth %" HUD
  * - Centre (desktop >= 768px) / collapsible menu (< 768px mobile): section links with active section highlight
- * - Right (always reachable from 360px mobile to desktop): Resume, GitHub, LinkedIn, optional Sound toggle, and Plain view toggle
+ * - Right (always reachable from 360px mobile to desktop): Resume, GitHub, LinkedIn, optional Sound toggle, Plain view toggle, and Theme toggle
  * - Enforces >= 44px tap targets on mobile and desktop while fitting cleanly at 360px, 375px, 390px, 414px, 768px, 990px, and 1280px.
  */
 export function Navbar({
@@ -26,6 +106,7 @@ export function Navbar({
   onTogglePlainView,
   soundMuted = true,
   onToggleSoundMuted,
+  introActive = false,
   onSelectSection,
 }: NavbarProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -54,19 +135,19 @@ export function Navbar({
   };
 
   return (
-    <header className="fixed top-0 left-0 right-0 z-40 border-b border-[#262C36]/90 bg-[#0B0D10]/95 pt-[env(safe-area-inset-top)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] font-data-mono text-xs text-[#E8E4DA]">
-      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-x-1.5 gap-y-1 px-2 py-0.5 sm:px-4 md:px-5 lg:px-8">
+    <header className="fixed top-0 left-0 right-0 z-40 border-b border-[var(--border-subtle)] bg-[var(--bg)] pt-[env(safe-area-inset-top)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] font-data-mono text-xs text-[var(--text-primary)]">
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-x-1 gap-y-1 px-2 py-0.5 sm:px-4 md:px-5 lg:px-8">
         {/* Left: Brand mark + whole-page depth % HUD */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
           <a
             href={isOnWriteupRoute ? '/' : '#home'}
             onClick={(e) => {
               e.preventDefault();
               handleSectionNavigation('home');
             }}
-            className="inline-flex min-h-[44px] items-center gap-1.5 px-1 text-[#E8E4DA] transition-colors hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] whitespace-nowrap"
+            className="inline-flex min-h-[44px] items-center gap-1.5 px-1 text-[var(--text-primary)] transition-colors hover:text-[var(--accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] whitespace-nowrap"
           >
-            <span className="text-[#4FD1D9]" aria-hidden="true">
+            <span className="text-[var(--accent)]" aria-hidden="true">
               {SITE_CONFIG.identity.mark}
             </span>
             <span className="hidden sm:inline md:text-[11px] lg:text-xs tracking-wider">
@@ -76,7 +157,7 @@ export function Navbar({
 
           <span
             aria-label="Page scroll depth"
-            className="text-[11px] text-[#9A968E] whitespace-nowrap"
+            className="text-[11px] text-[var(--text-muted)] whitespace-nowrap"
           >
             depth {Math.round(pageProgress * 100)}%
           </span>
@@ -100,12 +181,12 @@ export function Navbar({
                   to={SITE_CONFIG.routing.writeupsBasePath}
                   aria-current="page"
                   onClick={() => setMobileMenuOpen(false)}
-                  className="relative inline-flex min-h-[44px] items-center px-0.5 font-medium text-[#4FD1D9] transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9]"
+                  className="relative inline-flex min-h-[44px] items-center px-0.5 font-medium text-[var(--accent)] transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
                 >
                   {sec.navLabel}
                   <span
                     aria-hidden="true"
-                    className="absolute bottom-1.5 left-0 right-0 h-[1.5px] bg-[#4FD1D9]"
+                    className="absolute bottom-1.5 left-0 right-0 h-[1.5px] bg-[var(--accent)]"
                   />
                 </Link>
               );
@@ -126,17 +207,17 @@ export function Navbar({
                   e.preventDefault();
                   handleSectionNavigation(sec.id);
                 }}
-                className={`relative inline-flex min-h-[44px] items-center px-0.5 transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] ${
+                className={`relative inline-flex min-h-[44px] items-center px-0.5 transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] ${
                   isActive
-                    ? 'text-[#4FD1D9] font-medium'
-                    : 'text-[#9A968E] hover:text-[#E8E4DA]'
+                    ? 'text-[var(--accent)] font-medium'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
                 }`}
               >
                 {sec.navLabel}
                 {isActive && (
                   <span
                     aria-hidden="true"
-                    className="absolute bottom-1.5 left-0 right-0 h-[1.5px] bg-[#4FD1D9]"
+                    className="absolute bottom-1.5 left-0 right-0 h-[1.5px] bg-[var(--accent)]"
                   />
                 )}
               </a>
@@ -144,13 +225,13 @@ export function Navbar({
           })}
         </nav>
 
-        {/* Right: External links + Plain view toggle + Mobile section menu button (< 768px only) */}
+        {/* Right: External links + Plain view toggle + Mobile Menu (< 768px) + Theme toggle at far right */}
         <div className="flex items-center gap-0.5 sm:gap-1.5 lg:gap-2 shrink-0">
           <a
             href={SITE_CONFIG.externalLinks.resume}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex min-h-[44px] items-center px-1 text-[11px] lg:text-xs text-[#E8E4DA] transition-colors hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] whitespace-nowrap"
+            className="inline-flex min-h-[44px] items-center px-1 text-[11px] lg:text-xs text-[var(--text-primary)] transition-colors hover:text-[var(--accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] whitespace-nowrap"
           >
             Resume
           </a>
@@ -158,7 +239,7 @@ export function Navbar({
             href={SITE_CONFIG.externalLinks.github}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex min-h-[44px] items-center px-1 text-[11px] lg:text-xs text-[#E8E4DA] transition-colors hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] whitespace-nowrap"
+            className="inline-flex min-h-[44px] items-center px-1 text-[11px] lg:text-xs text-[var(--text-primary)] transition-colors hover:text-[var(--accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] whitespace-nowrap"
           >
             GitHub
           </a>
@@ -166,7 +247,7 @@ export function Navbar({
             href={SITE_CONFIG.externalLinks.linkedin}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex min-h-[44px] items-center px-1 text-[11px] lg:text-xs text-[#E8E4DA] transition-colors hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] whitespace-nowrap"
+            className="inline-flex min-h-[44px] items-center px-1 text-[11px] lg:text-xs text-[var(--text-primary)] transition-colors hover:text-[var(--accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] whitespace-nowrap"
           >
             LinkedIn
           </a>
@@ -177,10 +258,10 @@ export function Navbar({
               data-testid="sound-toggle-button"
               aria-pressed={!soundMuted}
               onClick={onToggleSoundMuted}
-              className={`cursor-pointer inline-flex min-h-[44px] items-center rounded border px-1.5 text-[11px] sm:px-2 lg:text-xs transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] ${
+              className={`cursor-pointer inline-flex min-h-[44px] items-center rounded border px-1.5 text-[11px] sm:px-2 lg:text-xs transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] ${
                 !soundMuted
-                  ? 'border-[#4FD1D9] bg-[#4FD1D9]/15 text-[#4FD1D9]'
-                  : 'border-[#262C36] bg-[#0B0D10] text-[#9A968E] hover:border-[#4FD1D9] hover:text-[#E8E4DA]'
+                  ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
+                  : 'border-[var(--border-subtle)] bg-[var(--bg)] text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--text-primary)]'
               }`}
             >
               {soundMuted ? 'Sound off' : 'Sound on'}
@@ -191,10 +272,10 @@ export function Navbar({
             type="button"
             aria-pressed={plainView}
             onClick={onTogglePlainView}
-            className={`cursor-pointer inline-flex min-h-[44px] items-center rounded border px-1.5 text-[11px] sm:px-2 lg:text-xs transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] ${
+            className={`cursor-pointer inline-flex min-h-[44px] items-center rounded border px-1.5 text-[11px] sm:px-2 lg:text-xs transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] ${
               plainView
-                ? 'border-[#4FD1D9] bg-[#4FD1D9]/15 text-[#4FD1D9]'
-                : 'border-[#262C36] bg-[#0B0D10] text-[#9A968E] hover:border-[#4FD1D9] hover:text-[#E8E4DA]'
+                ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
+                : 'border-[var(--border-subtle)] bg-[var(--bg)] text-[var(--text-muted)] hover:border-[var(--accent)] hover:text-[var(--text-primary)]'
             }`}
           >
             Plain view
@@ -206,10 +287,13 @@ export function Navbar({
             aria-expanded={mobileMenuOpen}
             aria-controls="mobile-sections-menu"
             onClick={() => setMobileMenuOpen((prev) => !prev)}
-            className="md:hidden cursor-pointer inline-flex min-h-[44px] items-center rounded border border-[#262C36] bg-[#0B0D10] px-1.5 text-[11px] sm:px-2 sm:text-xs text-[#E8E4DA] transition-colors hover:border-[#4FD1D9] hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] whitespace-nowrap"
+            className="md:hidden cursor-pointer inline-flex min-h-[44px] items-center rounded border border-[var(--border-subtle)] bg-[var(--bg)] px-1.5 text-[11px] sm:px-2 sm:text-xs text-[var(--text-primary)] transition-colors hover:border-[var(--accent)] hover:text-[var(--accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] whitespace-nowrap"
           >
             {mobileMenuOpen ? 'Close' : 'Menu'}
           </button>
+
+          {/* Theme toggle button at the far right of the top bar (after Plain view and next to Menu on mobile); hidden during terminal intro */}
+          {!introActive && <ThemeToggleButton />}
         </div>
       </div>
 
@@ -219,7 +303,7 @@ export function Navbar({
           id="mobile-sections-menu"
           data-lenis-prevent
           aria-label="Mobile sections navigation"
-          className="md:hidden max-h-[75svh] overflow-y-auto border-t border-[#262C36] bg-[#0B0D10] px-4 py-3"
+          className="md:hidden max-h-[75svh] overflow-y-auto border-t border-[var(--border-subtle)] bg-[var(--bg)] px-4 py-3"
         >
           <ul className="flex flex-col gap-1">
             {SITE_CONFIG.sections.map((sec) => {
@@ -234,10 +318,10 @@ export function Navbar({
                       to={SITE_CONFIG.routing.writeupsBasePath}
                       aria-current="page"
                       onClick={() => setMobileMenuOpen(false)}
-                      className="flex min-h-[44px] items-center justify-between rounded px-2.5 py-2 text-xs font-medium text-[#4FD1D9] bg-[#4FD1D9]/10 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9]"
+                      className="flex min-h-[44px] items-center justify-between rounded px-2.5 py-2 text-xs font-medium text-[var(--accent)] bg-[var(--accent)]/10 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
                     >
                       <span>{sec.navLabel}</span>
-                      <span className="text-[11px] text-[#9A968E]">{sec.kicker}</span>
+                      <span className="text-[11px] text-[var(--text-muted)]">{sec.kicker}</span>
                     </Link>
                   </li>
                 );
@@ -258,14 +342,14 @@ export function Navbar({
                       e.preventDefault();
                       handleSectionNavigation(sec.id);
                     }}
-                    className={`flex min-h-[44px] items-center justify-between rounded px-2.5 py-2 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] ${
+                    className={`flex min-h-[44px] items-center justify-between rounded px-2.5 py-2 text-xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] ${
                       isActive
-                        ? 'text-[#4FD1D9] font-medium bg-[#4FD1D9]/10'
-                        : 'text-[#E8E4DA] hover:text-[#4FD1D9]'
+                        ? 'text-[var(--accent)] font-medium bg-[var(--accent)]/10'
+                        : 'text-[var(--text-primary)] hover:text-[var(--accent)]'
                     }`}
                   >
                     <span>{sec.navLabel}</span>
-                    <span className="text-[11px] text-[#9A968E]">{sec.kicker}</span>
+                    <span className="text-[11px] text-[var(--text-muted)]">{sec.kicker}</span>
                   </a>
                 </li>
               );

@@ -160,12 +160,13 @@ export function TerminalIntro({
     <div
       role="region"
       aria-label="Reconnaissance terminal intro"
-      className="fixed inset-0 z-50 flex flex-col justify-between bg-[#0B0D10] px-6 py-8 sm:px-12 sm:py-10 font-data-mono text-[#E8E4DA]"
+      data-theme="dark"
+      className="fixed inset-0 z-50 flex flex-col justify-between bg-[var(--bg)] px-6 py-8 sm:px-12 sm:py-10 font-data-mono text-[var(--text-primary)]"
     >
       {/* Top bar: subtle session header and always-visible Skip control */}
-      <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-b border-[#262C36] pb-4">
-        <div className="flex items-center gap-3 text-xs tracking-wider text-[#9A968E]">
-          <span className="text-[#4FD1D9]">{SITE_CONFIG.identity.mark}</span>
+      <div className="mx-auto flex w-full max-w-5xl items-center justify-between border-b border-[var(--border-subtle)] pb-4">
+        <div className="flex items-center gap-3 text-xs tracking-wider text-[var(--text-muted)]">
+          <span className="text-[var(--accent)]">{SITE_CONFIG.identity.mark}</span>
           <span>tty0 · passive-recon</span>
           <span aria-hidden="true">·</span>
           <span>{isRepeatVisit ? 'cached-session (2s)' : 'initial-handshake (8s)'}</span>
@@ -175,7 +176,7 @@ export function TerminalIntro({
           type="button"
           data-testid="skip-intro-button"
           onClick={finishIntro}
-          className="cursor-pointer rounded border border-[#262C36] bg-[#0B0D10] px-4 py-2 text-xs font-medium tracking-wider text-[#E8E4DA] transition-colors duration-150 hover:border-[#4FD1D9] hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9] min-h-[44px]"
+          className="cursor-pointer rounded border border-[var(--border-subtle)] bg-[var(--bg)] px-4 py-2 text-xs font-medium tracking-wider text-[var(--text-primary)] transition-colors duration-150 hover:border-[var(--accent)] hover:text-[var(--accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] min-h-[44px]"
         >
           Skip
         </button>
@@ -188,18 +189,18 @@ export function TerminalIntro({
             isClearing ? 'opacity-0' : 'opacity-100'
           }`}
         >
-          <div className="mb-3 text-xs text-[#9A968E]">
+          <div className="mb-3 text-xs text-[var(--text-muted)]">
             session: vaibhav@lab-node-01 ~
           </div>
 
           <div className="space-y-2.5 text-xs sm:text-sm leading-relaxed">
             {visibleLines.map((line) => {
-              let textColorClass = 'text-[#E8E4DA]';
+              let textColorClass = 'text-[var(--text-primary)]';
               if (line.tone === 'command') {
-                textColorClass = 'text-[#4FD1D9]';
+                textColorClass = 'text-[var(--accent)]';
               } else if (line.tone === 'warning' || line.tone === 'granted') {
-                // Rare second colour (#E8A33D amber) reserved strictly for warnings and access granted
-                textColorClass = 'text-[#E8A33D]';
+                // Rare second colour (amber) reserved strictly for warnings and access granted
+                textColorClass = 'text-[var(--amber)]';
               }
 
               return (
@@ -208,7 +209,7 @@ export function TerminalIntro({
                   {line.isActive && (
                     <span
                       aria-hidden="true"
-                      className="ml-0.5 inline-block h-4 w-2 translate-y-0.5 bg-[#4FD1D9]"
+                      className="ml-0.5 inline-block h-4 w-2 translate-y-0.5 bg-[var(--accent)]"
                     />
                   )}
                 </div>
@@ -220,7 +221,7 @@ export function TerminalIntro({
 
       {/* Bottom progress bar */}
       <div className="mx-auto w-full max-w-5xl">
-        <div className="flex items-center justify-between text-xs text-[#9A968E] mb-2">
+        <div className="flex items-center justify-between text-xs text-[var(--text-muted)] mb-2">
           <span>resolving identity</span>
           <span>
             {Math.min(
@@ -230,9 +231,9 @@ export function TerminalIntro({
             %
           </span>
         </div>
-        <div className="h-px w-full bg-[#262C36] overflow-hidden">
+        <div className="h-px w-full bg-[var(--border-subtle)] overflow-hidden">
           <div
-            className="h-full bg-[#4FD1D9] transition-transform duration-75 origin-left"
+            className="h-full bg-[var(--accent)] transition-transform duration-75 origin-left"
             style={{
               transform: `scaleX(${Math.min(
                 1,

@@ -4,6 +4,7 @@ import {
   SITE_CONFIG,
   type MorphStateName,
   type QualityTierName,
+  type ThemeMode,
 } from './config';
 import {
   buildPacketEdgeLoops,
@@ -33,6 +34,7 @@ import {
   type TopologyTargetData,
 } from './particleMath';
 import type { ScrollArrivalController } from './PortfolioSections';
+import { getTheme, subscribeTheme } from './themeStore';
 
 export interface SceneDebugStats {
   tier: QualityTierName;
@@ -42,6 +44,7 @@ export interface SceneDebugStats {
   pixelRatio: number;
   morphState: MorphStateName;
   morphParticleCount: number;
+  clearAlpha: number;
 }
 
 export interface DeltaSceneProps {
@@ -283,9 +286,59 @@ export function DeltaScene({
         viewportWidth: window.innerWidth,
       });
 
-    // 1. Scene
+    const initialThemeMode: ThemeMode = getTheme();
+    const buildPaletteForTheme = (mode: ThemeMode) => {
+      const t = SITE_CONFIG.theme.themes[mode];
+      return {
+        mode,
+        clearColorHex: t.background,
+        clearRgb: hexToRgbNormalized(t.background),
+        nodeBaseRgb: hexToRgbNormalized(t.sceneNodeColor),
+        ambientBaseRgb:
+          mode === 'light'
+            ? hexToRgbNormalized(t.sceneNodeColor)
+            : hexToRgbNormalized(t.textMuted),
+        accentRgb: hexToRgbNormalized(t.sceneHighlightColor),
+        amberRgb: hexToRgbNormalized(t.sceneAmberColor),
+        lineRgb: hexToRgbNormalized(t.sceneLineColor),
+        lineBaseAlpha: t.sceneLineAlpha as number,
+        pointSizeScale: t.scenePointSizeScale as number,
+        packetCoreRgb:
+          mode === 'light'
+            ? hexToRgbNormalized(t.sceneHighlightColor)
+            : ([0.92, 0.99, 1.0] as [number, number, number]),
+        useNormalBlending: !t.scenePacketAdditiveBlending,
+      };
+    };
+
+    const PALETTES = {
+      dark: buildPaletteForTheme('dark'),
+      light: buildPaletteForTheme('light'),
+    };
+
+    let currentThemeMode: ThemeMode = initialThemeMode;
+    const initPal = PALETTES[initialThemeMode];
+
+    // Mutable current RGB tuples used by CPU morph particle colours and GPU uniforms
+    const ivoryRgb: [number, number, number] = [
+      initPal.nodeBaseRgb[0],
+      initPal.nodeBaseRgb[1],
+      initPal.nodeBaseRgb[2],
+    ];
+    const cyanRgb: [number, number, number] = [
+      initPal.accentRgb[0],
+      initPal.accentRgb[1],
+      initPal.accentRgb[2],
+    ];
+    const amberRgb: [number, number, number] = [
+      initPal.amberRgb[0],
+      initPal.amberRgb[1],
+      initPal.amberRgb[2],
+    ];
+
+    // 1. Scene (transparent background so page background comes solely from CSS var(--bg))
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(SITE_CONFIG.colors.background);
+    scene.background = null;
 
     // 2. Camera (starts at cameraStartZ and moves forward into -Z as the user scrolls through sections)
     const camera = new THREE.PerspectiveCamera(
@@ -296,21 +349,21 @@ export function DeltaScene({
     );
     camera.position.set(0, 0, SITE_CONFIG.scroll.cameraStartZ);
 
-    // 3. Renderer (pixel ratio capped by tier: <=2 on desktop, <=1.5 on mobile)
+    // 3. Renderer (transparent alpha: true, clearAlpha 0, pixel ratio capped by tier)
     let renderer: THREE.WebGLRenderer;
     try {
       renderer = new THREE.WebGLRenderer({
         antialias: currentProfile.tier !== 'low',
         powerPreference: 'high-performance',
-        alpha: false,
+        alpha: true,
       });
     } catch {
       return;
     }
 
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    renderer.toneMapping = THREE.NoToneMapping;
+    renderer.setClearColor(0x000000, 0);
     renderer.setPixelRatio(currentProfile.pixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
     container.appendChild(renderer.domElement);
@@ -338,18 +391,49 @@ export function DeltaScene({
       uEnableScanPulse: { value: SITE_CONFIG.idle.enableScanPulse ? 1.0 : 0.0 },
       uScanPulsePeriod: { value: SITE_CONFIG.idle.scanPulsePeriodSec },
       uScanPulseIntensity: { value: SITE_CONFIG.idle.scanPulseIntensity },
-      uFogColor: { value: new THREE.Color(SITE_CONFIG.colors.background) },
-      uAccentColor: { value: new THREE.Color(SITE_CONFIG.colors.accent) },
+      uNodeBaseColor: {
+        value: new THREE.Vector3(
+          initPal.nodeBaseRgb[0],
+          initPal.nodeBaseRgb[1],
+          initPal.nodeBaseRgb[2],
+        ),
+      },
+      uAmbientBaseColor: {
+        value: new THREE.Vector3(
+          initPal.ambientBaseRgb[0],
+          initPal.ambientBaseRgb[1],
+          initPal.ambientBaseRgb[2],
+        ),
+      },
+      uAccentColor: {
+        value: new THREE.Vector3(
+          initPal.accentRgb[0],
+          initPal.accentRgb[1],
+          initPal.accentRgb[2],
+        ),
+      },
+      uLineColor: {
+        value: new THREE.Vector3(
+          initPal.lineRgb[0],
+          initPal.lineRgb[1],
+          initPal.lineRgb[2],
+        ),
+      },
+      uLineBaseAlpha: { value: initPal.lineBaseAlpha },
+      uPacketCoreColor: {
+        value: new THREE.Vector3(
+          initPal.packetCoreRgb[0],
+          initPal.packetCoreRgb[1],
+          initPal.packetCoreRgb[2],
+        ),
+      },
+      uThemePointSizeScale: { value: initPal.pointSizeScale },
       uAmbientVisibility: { value: 0 },
       uMorphDim: { value: 1.0 },
       uMaxNodePointSizePx: { value: SITE_CONFIG.performance.maxNodePointSizePx },
       uMaxAmbientPointSizePx: { value: SITE_CONFIG.performance.maxAmbientPointSizePx },
       uMaxNearCameraAlpha: { value: SITE_CONFIG.performance.maxNearCameraAlpha },
     };
-
-    const ivoryRgb = hexToRgbNormalized(SITE_CONFIG.colors.text);
-    const cyanRgb = hexToRgbNormalized(SITE_CONFIG.colors.accent);
-    const amberRgb = hexToRgbNormalized(SITE_CONFIG.colors.amber);
 
     let isDisposed = false;
 
@@ -387,6 +471,7 @@ export function DeltaScene({
           attribute vec3 aColor;
 
           uniform float uBasePointSize;
+          uniform float uThemePointSizeScale;
           uniform float uPixelRatio;
           uniform float uViewportHeight;
           uniform float uEnableScanPulse;
@@ -394,6 +479,7 @@ export function DeltaScene({
           uniform float uScanPulseIntensity;
           uniform float uMaxNodePointSizePx;
           uniform float uMorphDim;
+          uniform vec3 uNodeBaseColor;
           uniform vec3 uAccentColor;
 
           varying vec3 vColor;
@@ -419,10 +505,12 @@ export function DeltaScene({
               pulseBoost = band * uScanPulseIntensity * uIdleScale;
             }
 
-            float rawSize = (uBasePointSize * (1.0 + pulseBoost * 0.35) * uViewportHeight * 0.55 * uPixelRatio) / dist;
-            gl_PointSize = clamp(rawSize, 1.5 * uPixelRatio, uMaxNodePointSizePx * uPixelRatio);
+            float rawSize = (uBasePointSize * uThemePointSizeScale * (1.0 + pulseBoost * 0.35) * uViewportHeight * 0.55 * uPixelRatio) / dist;
+            gl_PointSize = clamp(rawSize, 1.5 * uPixelRatio, uMaxNodePointSizePx * uThemePointSizeScale * uPixelRatio);
 
-            vColor = mix(aColor, uAccentColor, clamp(pulseBoost, 0.0, 1.0));
+            float isAccent = 1.0 - step(0.45, aColor.r);
+            vec3 baseNodeCol = mix(uNodeBaseColor, uAccentColor, isAccent);
+            vColor = mix(baseNodeCol, uAccentColor, clamp(pulseBoost, 0.0, 1.0));
             float fogDist = length(mvPosition.xyz);
             // Dim dispersed hero particles so they never pass behind body text at high brightness
             float scrollDim = mix(1.0, 0.22, clamp(uScrollProgress, 0.0, 1.0));
@@ -497,6 +585,7 @@ export function DeltaScene({
           attribute vec3 aDrift;
           attribute float aPhase;
           uniform float uMorphDim;
+          uniform float uLineBaseAlpha;
 
           varying float vLineAlpha;
 
@@ -509,16 +598,16 @@ export function DeltaScene({
 
             float p = clamp(uScrollProgress, 0.0, 1.0);
             float smoothP = p * p * (3.0 - 2.0 * p);
-            vLineAlpha = 0.22 * pow(1.0 - smoothP, 2.2) * uMorphDim;
+            vLineAlpha = uLineBaseAlpha * pow(1.0 - smoothP, 2.2) * uMorphDim;
           }
         `,
         fragmentShader: /* glsl */ `
-          uniform vec3 uAccentColor;
+          uniform vec3 uLineColor;
           varying float vLineAlpha;
 
           void main() {
             if (vLineAlpha < 0.005) discard;
-            gl_FragColor = vec4(uAccentColor, vLineAlpha);
+            gl_FragColor = vec4(uLineColor, vLineAlpha);
           }
         `,
         transparent: true,
@@ -616,6 +705,7 @@ export function DeltaScene({
           uniform float uPacketSpeed;
           uniform float uPacketTailLen;
           uniform float uPacketSize;
+          uniform float uThemePointSizeScale;
           uniform float uPixelRatio;
           uniform float uViewportHeight;
           uniform float uMaxNodePointSizePx;
@@ -651,14 +741,15 @@ export function DeltaScene({
 
             float dist = max(1.4, -mvPosition.z);
             float sizeFalloff = mix(1.0, 0.48, trailFrac);
-            float rawPktSize = (uPacketSize * sizeFalloff * uViewportHeight * 0.55 * uPixelRatio) / dist;
-            gl_PointSize = clamp(rawPktSize, 1.5 * uPixelRatio, uMaxNodePointSizePx * uPixelRatio);
+            float rawPktSize = (uPacketSize * uThemePointSizeScale * sizeFalloff * uViewportHeight * 0.55 * uPixelRatio) / dist;
+            gl_PointSize = clamp(rawPktSize, 1.5 * uPixelRatio, uMaxNodePointSizePx * uThemePointSizeScale * uPixelRatio);
 
             vPacketAlpha = (1.0 - trailFrac * 0.82) * uIdleScale * uMorphDim;
           }
         `,
         fragmentShader: /* glsl */ `
           uniform vec3 uAccentColor;
+          uniform vec3 uPacketCoreColor;
           varying float vPacketAlpha;
 
           void main() {
@@ -669,13 +760,15 @@ export function DeltaScene({
 
             float core = smoothstep(0.45, 0.0, r2);
             float halo = smoothstep(1.0, 0.2, r2);
-            vec3 pulseColor = mix(uAccentColor, vec3(0.92, 0.99, 1.0), core * 0.65);
+            vec3 pulseColor = mix(uAccentColor, uPacketCoreColor, core * 0.65);
             gl_FragColor = vec4(pulseColor, halo * vPacketAlpha);
           }
         `,
         transparent: true,
         depthWrite: false,
-        blending: THREE.AdditiveBlending,
+        blending: PALETTES[currentThemeMode].useNormalBlending
+          ? THREE.NormalBlending
+          : THREE.AdditiveBlending,
       });
 
       const packetPoints = new THREE.Points(packetGeometry, packetMaterial);
@@ -712,12 +805,15 @@ export function DeltaScene({
           attribute vec3 aColor;
 
           uniform float uTime;
+          uniform float uThemePointSizeScale;
           uniform float uPixelRatio;
           uniform float uViewportHeight;
           uniform float uAmbientVisibility;
           uniform float uAmbientMaxOpacity;
           uniform float uMaxAmbientPointSizePx;
           uniform float uMorphDim;
+          uniform vec3 uAmbientBaseColor;
+          uniform vec3 uAccentColor;
 
           varying vec3 vColor;
           varying float vAlpha;
@@ -739,10 +835,11 @@ export function DeltaScene({
             float farFade = smoothstep(22.0, 7.0, viewZ);
 
             float dist = max(2.4, viewZ);
-            float rawAmbientSize = (0.052 * uViewportHeight * 0.55 * uPixelRatio) / dist;
-            gl_PointSize = clamp(rawAmbientSize, 1.2 * uPixelRatio, uMaxAmbientPointSizePx * uPixelRatio);
+            float rawAmbientSize = (0.052 * uThemePointSizeScale * uViewportHeight * 0.55 * uPixelRatio) / dist;
+            gl_PointSize = clamp(rawAmbientSize, 1.2 * uPixelRatio, uMaxAmbientPointSizePx * uThemePointSizeScale * uPixelRatio);
 
-            vColor = aColor;
+            float isAccent = 1.0 - step(0.45, aColor.r);
+            vColor = mix(uAmbientBaseColor, uAccentColor, isAccent);
             vAlpha = min(uAmbientMaxOpacity, uAmbientMaxOpacity * uAmbientVisibility * nearFade * farFade * uMorphDim);
           }
         `,
@@ -827,6 +924,7 @@ export function DeltaScene({
             uPixelRatio: sharedUniforms.uPixelRatio,
             uViewportHeight: sharedUniforms.uViewportHeight,
             uMaxNodePointSizePx: sharedUniforms.uMaxNodePointSizePx,
+            uThemePointSizeScale: sharedUniforms.uThemePointSizeScale,
             uMorphOpacity: { value: 0.0 },
             uPointScale: { value: 0.048 },
           },
@@ -835,6 +933,7 @@ export function DeltaScene({
             uniform float uPixelRatio;
             uniform float uViewportHeight;
             uniform float uMaxNodePointSizePx;
+            uniform float uThemePointSizeScale;
             uniform float uPointScale;
 
             varying vec3 vColor;
@@ -843,8 +942,8 @@ export function DeltaScene({
               vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
               gl_Position = projectionMatrix * mvPosition;
               float dist = max(1.8, -mvPosition.z);
-              float rawSize = (uPointScale * uViewportHeight * 0.55 * uPixelRatio) / dist;
-              gl_PointSize = clamp(rawSize, 1.5 * uPixelRatio, (uMaxNodePointSizePx - 1.5) * uPixelRatio);
+              float rawSize = (uPointScale * uThemePointSizeScale * uViewportHeight * 0.55 * uPixelRatio) / dist;
+              gl_PointSize = clamp(rawSize, 1.5 * uPixelRatio, (uMaxNodePointSizePx - 1.5) * uThemePointSizeScale * uPixelRatio);
               vColor = aColor;
             }
           `,
@@ -881,7 +980,7 @@ export function DeltaScene({
 
         const topoEdgeMaterial = new THREE.ShaderMaterial({
           uniforms: {
-            uLineColor: { value: new THREE.Color(SITE_CONFIG.colors.accent) },
+            uLineColor: sharedUniforms.uLineColor,
             uLineOpacity: { value: 0.0 },
           },
           vertexShader: /* glsl */ `
@@ -1145,13 +1244,190 @@ export function DeltaScene({
     const getActiveMorphParticleCount = () =>
       activeMeshes.morphPool ? activeMeshes.morphPool.morphCount : 0;
 
+    // Theme colour lerp state (~300ms on toggle without rebuilding geometries, materials, or particle pool)
+    let isThemeLerping = false;
+    let themeLerpStartMs = 0;
+    let fromPalette = buildPaletteForTheme(currentThemeMode);
+    let toPalette = PALETTES[currentThemeMode];
+
+    const lerpScalar = (a: number, b: number, t: number) => a + (b - a) * t;
+    const lerpRgbTuple = (
+      a: [number, number, number],
+      b: [number, number, number],
+      t: number,
+    ): [number, number, number] => [
+      a[0] + (b[0] - a[0]) * t,
+      a[1] + (b[1] - a[1]) * t,
+      a[2] + (b[2] - a[2]) * t,
+    ];
+
+    const THEME_SNAP_EPSILON = 0.005;
+
+    const applyThemeInterpolation = (rawT: number) => {
+      // Snap to exact target colours when within a small epsilon of completion
+      const snappedToEnd = rawT >= 1 - THEME_SNAP_EPSILON;
+      const clamped = snappedToEnd ? 1 : Math.max(0, Math.min(1, rawT));
+      // Smoothstep easing over the 300ms colour transition
+      const t = snappedToEnd ? 1 : clamped * clamped * (3 - 2 * clamped);
+
+      const nodeBase: [number, number, number] = snappedToEnd
+        ? [
+            toPalette.nodeBaseRgb[0],
+            toPalette.nodeBaseRgb[1],
+            toPalette.nodeBaseRgb[2],
+          ]
+        : lerpRgbTuple(fromPalette.nodeBaseRgb, toPalette.nodeBaseRgb, t);
+      const ambBase: [number, number, number] = snappedToEnd
+        ? [
+            toPalette.ambientBaseRgb[0],
+            toPalette.ambientBaseRgb[1],
+            toPalette.ambientBaseRgb[2],
+          ]
+        : lerpRgbTuple(fromPalette.ambientBaseRgb, toPalette.ambientBaseRgb, t);
+      const accent: [number, number, number] = snappedToEnd
+        ? [
+            toPalette.accentRgb[0],
+            toPalette.accentRgb[1],
+            toPalette.accentRgb[2],
+          ]
+        : lerpRgbTuple(fromPalette.accentRgb, toPalette.accentRgb, t);
+      const amber: [number, number, number] = snappedToEnd
+        ? [
+            toPalette.amberRgb[0],
+            toPalette.amberRgb[1],
+            toPalette.amberRgb[2],
+          ]
+        : lerpRgbTuple(fromPalette.amberRgb, toPalette.amberRgb, t);
+      const lineCol: [number, number, number] = snappedToEnd
+        ? [toPalette.lineRgb[0], toPalette.lineRgb[1], toPalette.lineRgb[2]]
+        : lerpRgbTuple(fromPalette.lineRgb, toPalette.lineRgb, t);
+      const pktCore: [number, number, number] = snappedToEnd
+        ? [
+            toPalette.packetCoreRgb[0],
+            toPalette.packetCoreRgb[1],
+            toPalette.packetCoreRgb[2],
+          ]
+        : lerpRgbTuple(fromPalette.packetCoreRgb, toPalette.packetCoreRgb, t);
+
+      sharedUniforms.uNodeBaseColor.value.set(
+        nodeBase[0],
+        nodeBase[1],
+        nodeBase[2],
+      );
+      sharedUniforms.uAmbientBaseColor.value.set(
+        ambBase[0],
+        ambBase[1],
+        ambBase[2],
+      );
+      sharedUniforms.uAccentColor.value.set(accent[0], accent[1], accent[2]);
+      sharedUniforms.uLineColor.value.set(lineCol[0], lineCol[1], lineCol[2]);
+      sharedUniforms.uLineBaseAlpha.value = snappedToEnd
+        ? toPalette.lineBaseAlpha
+        : lerpScalar(fromPalette.lineBaseAlpha, toPalette.lineBaseAlpha, t);
+      sharedUniforms.uPacketCoreColor.value.set(
+        pktCore[0],
+        pktCore[1],
+        pktCore[2],
+      );
+      sharedUniforms.uThemePointSizeScale.value = snappedToEnd
+        ? toPalette.pointSizeScale
+        : lerpScalar(fromPalette.pointSizeScale, toPalette.pointSizeScale, t);
+
+      ivoryRgb[0] = nodeBase[0];
+      ivoryRgb[1] = nodeBase[1];
+      ivoryRgb[2] = nodeBase[2];
+
+      cyanRgb[0] = accent[0];
+      cyanRgb[1] = accent[1];
+      cyanRgb[2] = accent[2];
+
+      amberRgb[0] = amber[0];
+      amberRgb[1] = amber[1];
+      amberRgb[2] = amber[2];
+
+      const pool = activeMeshes.morphPool;
+      if (pool && currentMorphState === 'DOLLAR') {
+        for (let i = 0; i < pool.morphCount; i++) {
+          const i3 = i * 3;
+          pool.curColors[i3] = cyanRgb[0];
+          pool.curColors[i3 + 1] = cyanRgb[1];
+          pool.curColors[i3 + 2] = cyanRgb[2];
+        }
+        pool.colorAttr.needsUpdate = true;
+      }
+
+      if (snappedToEnd) {
+        isThemeLerping = false;
+      }
+    };
+
     const syncContainerDataAttrs = () => {
       container.setAttribute('data-morph-state', currentMorphState);
       container.setAttribute(
         'data-morph-particles',
         String(getActiveMorphParticleCount()),
       );
+      container.setAttribute('data-scene-theme', currentThemeMode);
+      container.setAttribute(
+        'data-scene-clear-color',
+        PALETTES[currentThemeMode].clearColorHex,
+      );
+      container.setAttribute(
+        'data-clear-alpha',
+        String(renderer.getClearAlpha()),
+      );
+      container.setAttribute(
+        'data-scene-blending',
+        PALETTES[currentThemeMode].useNormalBlending ? 'normal' : 'additive',
+      );
     };
+
+    const unsubscribeTheme = subscribeTheme((nextTheme) => {
+      if (isDisposed) return;
+      fromPalette = {
+        mode: currentThemeMode,
+        clearColorHex: PALETTES[currentThemeMode].clearColorHex,
+        clearRgb: PALETTES[currentThemeMode].clearRgb,
+        nodeBaseRgb: [ivoryRgb[0], ivoryRgb[1], ivoryRgb[2]],
+        ambientBaseRgb: [
+          sharedUniforms.uAmbientBaseColor.value.x,
+          sharedUniforms.uAmbientBaseColor.value.y,
+          sharedUniforms.uAmbientBaseColor.value.z,
+        ],
+        accentRgb: [cyanRgb[0], cyanRgb[1], cyanRgb[2]],
+        amberRgb: [amberRgb[0], amberRgb[1], amberRgb[2]],
+        lineRgb: [
+          sharedUniforms.uLineColor.value.x,
+          sharedUniforms.uLineColor.value.y,
+          sharedUniforms.uLineColor.value.z,
+        ],
+        lineBaseAlpha: sharedUniforms.uLineBaseAlpha.value,
+        pointSizeScale: sharedUniforms.uThemePointSizeScale.value,
+        packetCoreRgb: [
+          sharedUniforms.uPacketCoreColor.value.x,
+          sharedUniforms.uPacketCoreColor.value.y,
+          sharedUniforms.uPacketCoreColor.value.z,
+        ],
+        useNormalBlending: PALETTES[currentThemeMode].useNormalBlending,
+      };
+      currentThemeMode = nextTheme;
+      toPalette = PALETTES[nextTheme];
+
+      // Switch packet blending between AdditiveBlending (dark) and NormalBlending (light) without rebuilding material
+      activeMeshes.packetMaterial.blending = toPalette.useNormalBlending
+        ? THREE.NormalBlending
+        : THREE.AdditiveBlending;
+
+      syncContainerDataAttrs();
+
+      if (reducedMotionRef.current) {
+        isThemeLerping = false;
+        applyThemeInterpolation(1);
+      } else {
+        themeLerpStartMs = performance.now();
+        isThemeLerping = true;
+      }
+    });
 
     const emitDebugStats = (fpsVal: number) => {
       syncContainerDataAttrs();
@@ -1166,6 +1442,7 @@ export function DeltaScene({
           pixelRatio: currentProfile.pixelRatio,
           morphState: currentMorphState,
           morphParticleCount: getActiveMorphParticleCount(),
+          clearAlpha: renderer.getClearAlpha(),
         });
       }
     };
@@ -1270,6 +1547,20 @@ export function DeltaScene({
       const rawDt = (now - lastTimestamp) / 1000;
       lastTimestamp = now;
 
+      // Step 300ms theme colour lerp if active
+      if (isThemeLerping) {
+        const lerpDur = Math.max(1, SITE_CONFIG.theme.sceneColorLerpDurationMs);
+        const rawT = reducedMotionRef.current
+          ? 1
+          : (now - themeLerpStartMs) / lerpDur;
+        if (rawT >= 1) {
+          applyThemeInterpolation(1);
+          isThemeLerping = false;
+        } else {
+          applyThemeInterpolation(rawT);
+        }
+      }
+
       // Ignore huge pauses from tab switching when measuring FPS
       if (rawDt > 0 && rawDt < 0.25) {
         windowFrames += 1;
@@ -1345,7 +1636,7 @@ export function DeltaScene({
           updatePoolTargetsForState(pool, currentMorphState, 0);
 
           if (currentMorphState === 'DOLLAR') {
-            // Set initial glyph colour to cyan (#4FD1D9)
+            // Set initial glyph colour to current theme's accent (#4FD1D9 in dark, #0B6F78 in light)
             for (let i = 0; i < pool.morphCount; i++) {
               const i3 = i * 3;
               pool.curColors[i3] = cyanRgb[0];
@@ -1390,7 +1681,7 @@ export function DeltaScene({
           );
           updatePoolTargetsForState(pool, 'HASH', hashProg);
 
-          // Colour lerps smoothly from cyan (#4FD1D9) to rare amber (#E8A33D) over ~1,000 ms
+          // Colour lerps smoothly from theme accent to theme amber over ~1,000 ms
           const r = cyanRgb[0] + (amberRgb[0] - cyanRgb[0]) * hashProg;
           const g = cyanRgb[1] + (amberRgb[1] - cyanRgb[1]) * hashProg;
           const b = cyanRgb[2] + (amberRgb[2] - cyanRgb[2]) * hashProg;
@@ -1552,6 +1843,7 @@ export function DeltaScene({
 
     return () => {
       isDisposed = true;
+      unsubscribeTheme();
       window.cancelAnimationFrame(frameId);
       window.clearTimeout(resizeTimeoutId);
       window.removeEventListener('resize', onResize);

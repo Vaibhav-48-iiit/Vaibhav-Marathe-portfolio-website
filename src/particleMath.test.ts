@@ -1082,4 +1082,75 @@ test('Particle morph system: state machine transitions, tier particle counts, to
   assert.equal(selectedLeaves.length, 3);
 });
 
+test('dark/light theme store: starts in dark in-memory, notifies subscribers, and meets >= 4.5:1 WCAG contrast on all text pairs', async () => {
+  const {
+    getTheme,
+    getThemeTokens,
+    setTheme,
+    toggleTheme,
+    subscribeTheme,
+    resetThemeForTests,
+    computeContrastRatio,
+  } = await import('./themeStore');
+
+  resetThemeForTests();
+  assert.equal(SITE_CONFIG.theme.defaultTheme, 'dark');
+  assert.equal(SITE_CONFIG.theme.CODE_BLOCKS_ALWAYS_DARK, true);
+  assert.equal(getTheme(), 'dark');
+  assert.equal(getThemeTokens().background, '#0B0D10');
+
+  const observed: string[] = [];
+  const unsubscribe = subscribeTheme((mode) => {
+    observed.push(mode);
+  });
+
+  const switchedToLight = toggleTheme();
+  assert.equal(switchedToLight, 'light');
+  assert.equal(getTheme(), 'light');
+  assert.equal(getThemeTokens().background, '#F4F1EA');
+  assert.equal(getThemeTokens().text, '#14161A');
+  assert.equal(getThemeTokens().textMuted, '#5B5F66');
+  assert.equal(getThemeTokens().lineSubtle, '#D8D3C7');
+  assert.equal(getThemeTokens().accent, '#0B6F78');
+  assert.equal(getThemeTokens().amber, '#9A5500');
+  assert.equal(getThemeTokens().scenePacketAdditiveBlending, false);
+
+  const switchedBackToDark = toggleTheme();
+  assert.equal(switchedBackToDark, 'dark');
+  assert.equal(getTheme(), 'dark');
+  assert.deepEqual(observed, ['light', 'dark']);
+
+  setTheme('light');
+  assert.equal(getTheme(), 'light');
+  unsubscribe();
+  resetThemeForTests();
+  assert.equal(getTheme(), 'dark');
+
+  // Verify WCAG 2.1 contrast ratio >= 4.5:1 for all dark and light theme text pairs
+  const dark = SITE_CONFIG.theme.themes.dark;
+  assert.ok(computeContrastRatio(dark.text, dark.background) >= 4.5);
+  assert.ok(computeContrastRatio(dark.textMuted, dark.background) >= 4.5);
+  assert.ok(computeContrastRatio(dark.accent, dark.background) >= 4.5);
+  assert.ok(computeContrastRatio(dark.amber, dark.background) >= 4.5);
+
+  const light = SITE_CONFIG.theme.themes.light;
+  assert.ok(
+    computeContrastRatio(light.text, light.background) >= 4.5,
+    `Light primary text contrast ${computeContrastRatio(light.text, light.background).toFixed(2)}:1 must be >= 4.5:1`,
+  );
+  assert.ok(
+    computeContrastRatio(light.textMuted, light.background) >= 4.5,
+    `Light muted text contrast ${computeContrastRatio(light.textMuted, light.background).toFixed(2)}:1 must be >= 4.5:1`,
+  );
+  assert.ok(
+    computeContrastRatio(light.accent, light.background) >= 4.5,
+    `Light accent contrast ${computeContrastRatio(light.accent, light.background).toFixed(2)}:1 must be >= 4.5:1`,
+  );
+  assert.ok(
+    computeContrastRatio(light.amber, light.background) >= 4.5,
+    `Light amber contrast ${computeContrastRatio(light.amber, light.background).toFixed(2)}:1 must be >= 4.5:1`,
+  );
+});
+
+
 

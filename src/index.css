@@ -1,38 +1,107 @@
 @import "tailwindcss";
 
 @layer base {
-  :root {
-    --bg-primary: #0B0D10;
+  :root,
+  html[data-theme="dark"],
+  [data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0B0D10;
+    --bg-primary: var(--bg);
     --text-primary: #E8E4DA;
-    --accent-cyan: #4FD1D9;
-    --accent-amber: #E8A33D;
+    --text-muted: #9A968E;
+    --border-subtle: #262C36;
+    --accent: #4FD1D9;
+    --amber: #E8A33D;
     --scrollbar-track: #1A1D22;
     --scrollbar-thumb: #3A3F47;
+    --code-bg: #0B0D10;
+    --code-text: #E8E4DA;
+    --code-muted: #9A968E;
+    --code-border: #262C36;
+    --code-accent: #4FD1D9;
+    --theme-transition-ms: 180ms;
     --font-display: 'Instrument Serif', Georgia, serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   }
 
+  html[data-theme="light"] {
+    color-scheme: light;
+    --bg: #F4F1EA;
+    --bg-primary: var(--bg);
+    --text-primary: #14161A;
+    --text-muted: #5B5F66;
+    --border-subtle: #D8D3C7;
+    --accent: #0B6F78;
+    --amber: #9A5500;
+    --scrollbar-track: #E6E1D6;
+    --scrollbar-thumb: #B2ACA0;
+    --code-bg: #0B0D10;
+    --code-text: #E8E4DA;
+    --code-muted: #9A968E;
+    --code-border: #262C36;
+    --code-accent: #4FD1D9;
+    --theme-transition-ms: 180ms;
+  }
+
   html {
-    background-color: #0B0D10;
-    color: #E8E4DA;
+    background-color: var(--bg);
+    color: var(--text-primary);
     font-family: var(--font-mono);
     scroll-behavior: auto;
     scrollbar-width: thin;
-    scrollbar-color: #3A3F47 #1A1D22;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
   }
 
   body {
-    background-color: #0B0D10;
-    color: #E8E4DA;
+    background-color: var(--bg);
+    color: var(--text-primary);
     margin: 0;
     padding: 0;
     overflow-x: hidden;
   }
 
-  /* Thin dark scrollbar in Chrome, Edge, Safari, and Firefox */
+  /* 250ms colour transition on background and text; skipped under prefers-reduced-motion */
+  @media (prefers-reduced-motion: no-preference) {
+    html,
+    body,
+    header,
+    main,
+    section,
+    article,
+    aside,
+    footer,
+    nav,
+    div,
+    p,
+    h1,
+    h2,
+    h3,
+    h4,
+    span,
+    a,
+    button,
+    blockquote,
+    li,
+    ul,
+    ol {
+      transition-property: background-color, color, border-color, text-decoration-color;
+      transition-duration: var(--theme-transition-ms, 250ms);
+      transition-timing-function: ease-out;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0ms !important;
+    }
+  }
+
+  /* Custom thin scrollbar restyled for both dark and light themes */
   * {
     scrollbar-width: thin;
-    scrollbar-color: #3A3F47 #1A1D22;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
   }
 
   ::-webkit-scrollbar {
@@ -41,23 +110,23 @@
   }
 
   ::-webkit-scrollbar-track {
-    background: #1A1D22;
+    background: var(--scrollbar-track);
   }
 
   ::-webkit-scrollbar-thumb {
-    background-color: #3A3F47;
+    background-color: var(--scrollbar-thumb);
     border-radius: 3px;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background-color: #4FD1D9;
+    background-color: var(--accent);
   }
 
-  /* Visible cyan focus rings on every interactive element */
+  /* Visible accent focus rings on every interactive element */
   a:focus-visible,
   button:focus-visible,
   [tabindex]:focus-visible {
-    outline: 2px solid #4FD1D9;
+    outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
 }
@@ -85,12 +154,24 @@ html.lenis body {
   font-variant-numeric: tabular-nums;
 }
 
-/* Print-friendly styles for write-up reading pages */
+/* Print-friendly styles: always print dark text on a white background in both themes */
 @media print {
+  :root,
   html,
+  html[data-theme="dark"],
+  html[data-theme="light"],
   body {
+    color-scheme: light !important;
     background: #ffffff !important;
+    background-color: #ffffff !important;
     color: #111111 !important;
+    --bg: #ffffff !important;
+    --bg-primary: #ffffff !important;
+    --text-primary: #111111 !important;
+    --text-muted: #444444 !important;
+    --border-subtle: #cccccc !important;
+    --accent: #111111 !important;
+    --amber: #111111 !important;
     font-size: 11pt;
   }
 
@@ -104,7 +185,8 @@ html.lenis body {
 
   main,
   article,
-  section {
+  section,
+  div {
     background: transparent !important;
     color: #111111 !important;
     border-color: #cccccc !important;

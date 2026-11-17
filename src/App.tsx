@@ -49,6 +49,7 @@ import {
   PortfolioSections,
   type ScrollArrivalController,
 } from './PortfolioSections';
+import { getTheme, subscribeTheme } from './themeStore';
 import type { SceneDebugStats } from './DeltaScene';
 
 // Lazy-load the Three.js scene after first paint so hero HTML (name, tagline, nav) renders immediately
@@ -178,21 +179,21 @@ function HomeView({
           className="flex min-h-[100svh] w-full flex-col justify-between px-4 pt-20 pb-10 sm:px-10 md:px-20"
         >
           <div className="mt-4 mb-auto md:my-auto w-full max-w-7xl mx-auto">
-            {/* Solid/near-solid dark layer constrained to left column on >=768px so the Δ lattice never overlaps */}
-            <div className="max-w-sm md:max-w-[44%] lg:max-w-xl bg-[#0B0D10]/94 pr-4 sm:pr-6 py-3">
-              <p className="mb-2 font-data-mono text-xs tracking-widest text-[#9A968E]">
+            {/* Solid page background layer constrained to left column on >=768px so the Δ lattice never overlaps */}
+            <div className="max-w-sm md:max-w-[44%] lg:max-w-xl bg-[var(--bg)] pr-4 sm:pr-6 py-3">
+              <p className="mb-2 font-data-mono text-xs tracking-widest text-[var(--text-muted)]">
                 {homeSection.kicker}
               </p>
               <p
                 data-testid="hero-role-label"
-                className="mb-3 font-data-mono text-xs tracking-widest text-[#4FD1D9]"
+                className="mb-3 font-data-mono text-xs tracking-widest text-[var(--accent)]"
               >
                 {SITE_CONFIG.identity.mark} {SITE_CONFIG.hero.roleLabel}
               </p>
 
               <h1
                 data-testid="hero-main-title"
-                className={`font-display-serif text-[clamp(2.65rem,6.5vw,6.2rem)] font-normal leading-[0.94] tracking-tight text-[#E8E4DA] transition-opacity duration-500 ${
+                className={`font-display-serif text-[clamp(2.65rem,6.5vw,6.2rem)] font-normal leading-[0.94] tracking-tight text-[var(--text-primary)] transition-opacity duration-500 ${
                   introComplete || plainView ? 'opacity-100' : 'opacity-95'
                 }`}
               >
@@ -201,7 +202,7 @@ function HomeView({
             </div>
           </div>
 
-          <div className="w-full max-w-7xl mx-auto flex items-center justify-between border-t border-[#262C36]/70 pt-4 font-data-mono text-xs text-[#9A968E] bg-[#0B0D10]/90">
+          <div className="w-full max-w-7xl mx-auto flex items-center justify-between border-t border-[var(--border-subtle)]/70 pt-4 font-data-mono text-xs text-[var(--text-muted)] bg-[var(--bg)]">
             <span>
               {plainView
                 ? SITE_CONFIG.hero.plainViewPromptText
@@ -340,11 +341,15 @@ function AppShell() {
       pixelRatio: prof.pixelRatio,
       morphState: 'HERO',
       morphParticleCount: resolveMorphParticleCount(prof.tier, morphDisabled),
+      clearAlpha: 0,
     };
   })());
 
   // Direct DOM refs for the ?debug=1 overlay so 0.5s FPS samples never trigger React re-renders
   const debugTierSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugThemeSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugBodyBgSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugClearAlphaSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugFpsSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugParticlesSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugParticlesSubSpanRef = useRef<HTMLSpanElement | null>(null);
@@ -358,6 +363,19 @@ function AppShell() {
   const plainViewRef = useRef<boolean>(plainView);
   plainViewRef.current = plainView;
 
+  const readComputedBodyBgString = useCallback((): string => {
+    if (typeof window === 'undefined' || !document.body) {
+      return '#0B0D10';
+    }
+    const raw = window.getComputedStyle(document.body).backgroundColor;
+    const match = raw.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+    if (!match) return raw;
+    const r = Number(match[1]).toString(16).padStart(2, '0').toUpperCase();
+    const g = Number(match[2]).toString(16).padStart(2, '0').toUpperCase();
+    const b = Number(match[3]).toString(16).padStart(2, '0').toUpperCase();
+    return `#${r}${g}${b} (${raw})`;
+  }, []);
+
   const syncDebugHudDom = useCallback(() => {
     const stats = debugStatsRef.current;
     const isPlain = plainViewRef.current;
@@ -367,13 +385,26 @@ function AppShell() {
       : stats.particleCount + stats.ambientParticleCount;
     const morphStateLabel = isPlain ? 'AMBIENT' : stats.morphState;
     const morphCountVal = isPlain ? 0 : stats.morphParticleCount;
+    const currentTheme = getTheme();
 
     if (appRootRef.current) {
       appRootRef.current.setAttribute('data-quality-tier', tierLabel);
       appRootRef.current.setAttribute('data-morph-state', morphStateLabel);
+      appRootRef.current.setAttribute('data-theme', currentTheme);
     }
     if (debugTierSpanRef.current) {
       debugTierSpanRef.current.textContent = tierLabel;
+    }
+    if (debugThemeSpanRef.current) {
+      debugThemeSpanRef.current.textContent = currentTheme;
+    }
+    if (debugBodyBgSpanRef.current) {
+      debugBodyBgSpanRef.current.textContent = readComputedBodyBgString();
+    }
+    if (debugClearAlphaSpanRef.current) {
+      debugClearAlphaSpanRef.current.textContent = String(
+        isPlain ? 0 : stats.clearAlpha,
+      );
     }
     if (debugFpsSpanRef.current) {
       debugFpsSpanRef.current.textContent = String(isPlain ? 0 : stats.fps);
@@ -405,7 +436,39 @@ function AppShell() {
         rootRenderCountRef.current,
       );
     }
-  }, []);
+  }, [readComputedBodyBgString]);
+
+  // Subscribe to theme changes to update the debug HUD and root attribute directly without re-rendering AppShell
+  useEffect(() => {
+    let rafId = 0;
+    const updateBodyBgLabel = () => {
+      if (debugBodyBgSpanRef.current) {
+        debugBodyBgSpanRef.current.textContent = readComputedBodyBgString();
+      }
+    };
+    const unsub = subscribeTheme((nextTheme) => {
+      if (appRootRef.current) {
+        appRootRef.current.setAttribute('data-theme', nextTheme);
+      }
+      if (debugThemeSpanRef.current) {
+        debugThemeSpanRef.current.textContent = nextTheme;
+      }
+      updateBodyBgLabel();
+      window.cancelAnimationFrame(rafId);
+      const startMs = performance.now();
+      const pollBodyBg = (now: number) => {
+        updateBodyBgLabel();
+        if (now - startMs < 600) {
+          rafId = window.requestAnimationFrame(pollBodyBg);
+        }
+      };
+      rafId = window.requestAnimationFrame(pollBodyBg);
+    });
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      unsub();
+    };
+  }, [readComputedBodyBgString]);
 
   const [qualityTier, setQualityTier] = useState<QualityTierName>(
     () => debugStatsRef.current.tier,
@@ -843,10 +906,14 @@ function AppShell() {
   const currentParticleTotal = plainView
     ? 0
     : initialStats.particleCount + initialStats.ambientParticleCount;
+  const isIntroCurrentlyActive =
+    currentRoute.kind === 'portfolio' && !introComplete && !plainView;
 
   return (
     <div
       ref={appRootRef}
+      data-app-root="true"
+      data-theme={getTheme()}
       data-intro-state={introComplete ? 'resolved' : 'intro'}
       data-plain-view={plainView ? 'true' : 'false'}
       data-lenis-active={lenisActive ? 'true' : 'false'}
@@ -855,7 +922,7 @@ function AppShell() {
       data-active-section={activeSection}
       data-scroll-progress={pageProgress.toFixed(2)}
       data-route-kind={currentRoute.kind}
-      className="relative min-h-[100svh] bg-[#0B0D10] text-[#E8E4DA]"
+      className="relative min-h-[100svh] bg-[var(--bg)] text-[var(--text-primary)]"
     >
       {/* Accessible Skip to content link at the top of the page */}
       <a
@@ -869,7 +936,7 @@ function AppShell() {
             scrollToTarget(mainEl, { offset: SITE_CONFIG.lenis.headerOffsetPx });
           }
         }}
-        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded focus:border focus:border-[#4FD1D9] focus:bg-[#0B0D10] focus:px-3 focus:py-1.5 focus:font-data-mono focus:text-xs focus:text-[#4FD1D9]"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded focus:border focus:border-[var(--accent)] focus:bg-[var(--bg)] focus:px-3 focus:py-1.5 focus:font-data-mono focus:text-xs focus:text-[var(--accent)]"
       >
         Skip to content
       </a>
@@ -883,6 +950,7 @@ function AppShell() {
         soundMuted={soundMuted}
         onToggleSoundMuted={handleToggleSoundMuted}
         onSelectSection={handleSelectSection}
+        introActive={isIntroCurrentlyActive}
       />
 
       {/* Optional ?debug=1 overlay (updated via DOM refs, never triggers React state re-renders) */}
@@ -890,26 +958,56 @@ function AppShell() {
         <aside
           data-testid="debug-hud"
           aria-label="Debug performance overlay"
-          className="fixed bottom-3 right-3 z-50 border border-[#262C36] bg-[#0B0D10]/95 px-3 py-2 font-data-mono text-[11px] leading-snug text-[#E8E4DA] pointer-events-none"
+          className="fixed bottom-3 right-3 z-50 border border-[var(--border-subtle)] bg-[var(--bg)] px-3 py-2 font-data-mono text-[11px] leading-snug text-[var(--text-primary)] pointer-events-none"
         >
           <div>
+            theme:{' '}
+            <span
+              ref={debugThemeSpanRef}
+              data-testid="debug-theme"
+              className="text-[var(--accent)]"
+            >
+              {getTheme()}
+            </span>
+          </div>
+          <div>
+            body bg:{' '}
+            <span
+              ref={debugBodyBgSpanRef}
+              data-testid="debug-body-bg"
+              className="text-[var(--text-primary)]"
+            >
+              {readComputedBodyBgString()}
+            </span>
+          </div>
+          <div>
+            clear alpha:{' '}
+            <span
+              ref={debugClearAlphaSpanRef}
+              data-testid="debug-clear-alpha"
+              className="text-[var(--accent)]"
+            >
+              {plainView ? 0 : initialStats.clearAlpha}
+            </span>
+          </div>
+          <div>
             tier:{' '}
-            <span ref={debugTierSpanRef} className="text-[#4FD1D9]">
+            <span ref={debugTierSpanRef} className="text-[var(--accent)]">
               {currentTierLabel}
             </span>
           </div>
           <div>
             fps:{' '}
-            <span ref={debugFpsSpanRef} className="text-[#E8E4DA]">
+            <span ref={debugFpsSpanRef} className="text-[var(--text-primary)]">
               {plainView ? 0 : initialStats.fps}
             </span>
           </div>
           <div>
             particles:{' '}
-            <span ref={debugParticlesSpanRef} className="text-[#E8E4DA]">
+            <span ref={debugParticlesSpanRef} className="text-[var(--text-primary)]">
               {currentParticleTotal}
             </span>
-            <span ref={debugParticlesSubSpanRef} className="text-[#9A968E]">
+            <span ref={debugParticlesSubSpanRef} className="text-[var(--text-muted)]">
               {!plainView
                 ? ` (${initialStats.particleCount}+${initialStats.ambientParticleCount})`
                 : ''}
@@ -920,7 +1018,7 @@ function AppShell() {
             <span
               ref={debugMorphStateSpanRef}
               data-testid="debug-morph-state"
-              className="text-[#4FD1D9]"
+              className="text-[var(--accent)]"
             >
               {plainView ? 'AMBIENT' : initialStats.morphState}
             </span>
@@ -930,20 +1028,20 @@ function AppShell() {
             <span
               ref={debugMorphCountSpanRef}
               data-testid="debug-morph-particles"
-              className="text-[#E8E4DA]"
+              className="text-[var(--text-primary)]"
             >
               {plainView ? 0 : initialStats.morphParticleCount}
             </span>
           </div>
           <div>
             pixel ratio:{' '}
-            <span ref={debugDprSpanRef} className="text-[#E8E4DA]">
+            <span ref={debugDprSpanRef} className="text-[var(--text-primary)]">
               {plainView ? 1 : initialStats.pixelRatio}
             </span>
           </div>
           <div>
             lenis:{' '}
-            <span ref={debugLenisSpanRef} className="text-[#4FD1D9]">
+            <span ref={debugLenisSpanRef} className="text-[var(--accent)]">
               {lenisActive ? 'on' : 'off'}
             </span>
           </div>
@@ -952,7 +1050,7 @@ function AppShell() {
             <span
               ref={debugIntroMountsSpanRef}
               data-testid="debug-intro-mounts"
-              className="text-[#4FD1D9]"
+              className="text-[var(--accent)]"
             >
               {getIntroMountCount()}
             </span>
@@ -962,7 +1060,7 @@ function AppShell() {
             <span
               ref={debugRootRendersSpanRef}
               data-testid="debug-root-renders"
-              className="text-[#E8E4DA]"
+              className="text-[var(--text-primary)]"
             >
               {rootRenderCountRef.current}
             </span>
@@ -996,7 +1094,7 @@ function AppShell() {
           element={
             <Suspense
               fallback={
-                <div className="min-h-[100svh] bg-[#0B0D10] pt-24 px-6 font-data-mono text-xs text-[#9A968E]" />
+                <div className="min-h-[100svh] bg-[var(--bg)] pt-24 px-6 font-data-mono text-xs text-[var(--text-muted)]" />
               }
             >
               <LazyWriteupsIndexPage plainView={plainView} />
@@ -1008,7 +1106,7 @@ function AppShell() {
           element={
             <Suspense
               fallback={
-                <div className="min-h-[100svh] bg-[#0B0D10] pt-24 px-6 font-data-mono text-xs text-[#9A968E]" />
+                <div className="min-h-[100svh] bg-[var(--bg)] pt-24 px-6 font-data-mono text-xs text-[var(--text-muted)]" />
               }
             >
               <LazyWriteupDetailPage

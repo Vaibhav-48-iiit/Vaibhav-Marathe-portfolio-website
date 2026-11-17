@@ -22,7 +22,7 @@ export interface WriteupPageProps {
 /**
  * Deterministic faint static particle layer for write-up reading pages.
  * No scroll-driven camera, no idle animation, very low opacity, hidden in Plain view
- * and hidden when printing.
+ * and hidden when printing. Follows the active theme via CSS variables.
  */
 function StaticReadingBackdrop({ plainView }: { plainView: boolean }) {
   const dots = useMemo(() => {
@@ -62,11 +62,7 @@ function StaticReadingBackdrop({ plainView }: { plainView: boolean }) {
             cx={`${dot.x}%`}
             cy={`${dot.y}%`}
             r={dot.size}
-            fill={
-              dot.isAccent
-                ? SITE_CONFIG.colors.accent
-                : SITE_CONFIG.colors.text
-            }
+            fill={dot.isAccent ? 'var(--accent)' : 'var(--text-primary)'}
           />
         ))}
       </svg>
@@ -77,6 +73,7 @@ function StaticReadingBackdrop({ plainView }: { plainView: boolean }) {
 /**
  * Horizontally scrolling code block in JetBrains Mono with a Copy button and no wrapping.
  * Guaranteed not to widen the page beyond the viewport on 360px/375px mobile screens.
+ * Stays dark in both themes when `SITE_CONFIG.theme.CODE_BLOCKS_ALWAYS_DARK` is true.
  */
 function CodeBlockView({ block }: { block: WriteupCodeBlock }) {
   const [copied, setCopied] = useState(false);
@@ -96,9 +93,13 @@ function CodeBlockView({ block }: { block: WriteupCodeBlock }) {
   };
 
   return (
-    <div className="my-4 w-full max-w-full overflow-hidden border border-[#262C36] bg-[#0B0D10]">
-      <div className="flex items-center justify-between gap-2 border-b border-[#262C36] px-3 py-1 font-data-mono text-[11px] text-[#9A968E]">
-        <span className="truncate">
+    <div
+      data-testid="writeup-code-block"
+      data-code-always-dark={SITE_CONFIG.theme.CODE_BLOCKS_ALWAYS_DARK ? 'true' : 'false'}
+      className="my-4 w-full max-w-full overflow-hidden border border-[var(--code-border)] bg-[var(--code-bg)]"
+    >
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--code-border)] bg-[var(--code-bg)] px-3 py-1 font-data-mono text-[11px] text-[var(--code-muted)]">
+        <span className="truncate text-[var(--code-muted)]">
           {isRenderableText(block.label)
             ? block.label
             : isRenderableText(block.language)
@@ -109,7 +110,7 @@ function CodeBlockView({ block }: { block: WriteupCodeBlock }) {
           type="button"
           data-copy-code="true"
           onClick={handleCopy}
-          className="cursor-pointer shrink-0 min-h-[44px] min-w-[44px] rounded border border-[#262C36] px-2.5 py-1 text-[11px] text-[#E8E4DA] transition-colors hover:border-[#4FD1D9] hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9]"
+          className="cursor-pointer shrink-0 min-h-[44px] min-w-[44px] rounded border border-[var(--code-border)] bg-[var(--code-bg)] px-2.5 py-1 text-[11px] text-[var(--code-text)] transition-colors hover:border-[var(--code-accent)] hover:text-[var(--code-accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--code-accent)]"
         >
           {copied ? 'Copied' : 'Copy'}
         </button>
@@ -118,9 +119,9 @@ function CodeBlockView({ block }: { block: WriteupCodeBlock }) {
         tabIndex={0}
         data-lenis-prevent
         data-code-scroll="true"
-        className="w-full max-w-full overflow-x-auto p-3.5 font-data-mono text-xs leading-relaxed text-[#E8E4DA] whitespace-pre"
+        className="w-full max-w-full overflow-x-auto bg-[var(--code-bg)] p-3.5 font-data-mono text-xs leading-relaxed text-[var(--code-text)] whitespace-pre"
       >
-        <code>{block.code}</code>
+        <code className="text-[var(--code-text)]">{block.code}</code>
       </pre>
     </div>
   );
@@ -159,31 +160,31 @@ export function WriteupsIndexPage({ plainView }: WriteupPageProps) {
   );
 
   return (
-    <div className="relative min-h-[100svh] w-full overflow-x-hidden bg-[#0B0D10] pt-24 pb-20 text-[#E8E4DA]">
+    <div className="relative min-h-[100svh] w-full overflow-x-hidden bg-[var(--bg)] pt-24 pb-20 text-[var(--text-primary)]">
       <StaticReadingBackdrop plainView={plainView} />
 
       <main id="main-content" className="relative z-10 mx-auto w-full max-w-4xl px-4 sm:px-10">
-        <div className="bg-[#0B0D10]/95 p-5 sm:p-10 border-l border-[#262C36]">
+        <div className="bg-[var(--bg)] p-5 sm:p-10 border-l border-[var(--border-subtle)]">
           <div className="mb-4">
             <Link
               to={`/${location.search}#writeups`}
-              className="inline-flex min-h-[44px] items-center font-data-mono text-xs text-[#9A968E] transition-colors hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9]"
+              className="inline-flex min-h-[44px] items-center font-data-mono text-xs text-[var(--text-muted)] transition-colors hover:text-[var(--accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
             >
               ← Back to portfolio
             </Link>
           </div>
 
-          <p className="mb-3 font-data-mono text-xs tracking-widest text-[#4FD1D9]">
+          <p className="mb-3 font-data-mono text-xs tracking-widest text-[var(--accent)]">
             05 // REPORT
           </p>
-          <h1 className="mb-8 font-display-serif text-[clamp(2.35rem,5.5vw,4.5rem)] font-normal leading-[1.02] tracking-tight text-[#E8E4DA]">
+          <h1 className="mb-8 font-display-serif text-[clamp(2.35rem,5.5vw,4.5rem)] font-normal leading-[1.02] tracking-tight text-[var(--text-primary)]">
             Writeups
           </h1>
 
           {publishedEntries.length > 0 ? (
             <ul
               data-writeups-index-state="published-list"
-              className="divide-y divide-[#262C36] border-t border-[#262C36] font-data-mono"
+              className="divide-y divide-[var(--border-subtle)] border-t border-[var(--border-subtle)] font-data-mono"
             >
               {publishedEntries.map((entry) => {
                 const entryHref = `${buildWriteupHref(entry.slug)}${location.search}`;
@@ -191,22 +192,22 @@ export function WriteupsIndexPage({ plainView }: WriteupPageProps) {
                   <li key={entry.slug} className="py-6">
                     <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
                       <div className="flex flex-wrap items-baseline gap-2.5">
-                        <h2 className="text-base sm:text-lg font-medium text-[#E8E4DA]">
+                        <h2 className="text-base sm:text-lg font-medium text-[var(--text-primary)]">
                           <Link
                             to={entryHref}
-                            className="inline-flex min-h-[44px] items-center transition-colors hover:text-[#4FD1D9] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9]"
+                            className="inline-flex min-h-[44px] items-center transition-colors hover:text-[var(--accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
                           >
                             {entry.title}
                           </Link>
                         </h2>
                         {isRenderableText(entry.platform) && (
-                          <span className="text-xs text-[#4FD1D9]">
+                          <span className="text-xs text-[var(--accent)]">
                             [{entry.platform}]
                           </span>
                         )}
                       </div>
 
-                      <div className="flex flex-wrap items-baseline gap-2 text-xs text-[#9A968E]">
+                      <div className="flex flex-wrap items-baseline gap-2 text-xs text-[var(--text-muted)]">
                         {isRenderableText(entry.date) && (
                           <>
                             <span>{entry.date}</span>
@@ -220,14 +221,14 @@ export function WriteupsIndexPage({ plainView }: WriteupPageProps) {
                     </div>
 
                     {isRenderableText(entry.summary) && (
-                      <p className="mb-3 text-xs sm:text-sm leading-relaxed text-[#E8E4DA]/90">
+                      <p className="mb-3 text-xs sm:text-sm leading-relaxed text-[var(--text-primary)]">
                         {entry.summary}
                       </p>
                     )}
 
                     <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
                       {entry.tags.length > 0 && (
-                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[#9A968E]">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[var(--text-muted)]">
                           {entry.tags.map((tag, idx) => (
                             <span
                               key={tag}
@@ -242,7 +243,7 @@ export function WriteupsIndexPage({ plainView }: WriteupPageProps) {
 
                       <Link
                         to={entryHref}
-                        className="inline-flex min-h-[44px] items-center py-1 text-[#4FD1D9] underline decoration-[#4FD1D9]/40 underline-offset-4 transition-colors hover:text-[#E8E4DA] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9]"
+                        className="inline-flex min-h-[44px] items-center py-1 text-[var(--accent)] underline decoration-[var(--accent)]/40 underline-offset-4 transition-colors hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
                       >
                         Read write-up →
                       </Link>
@@ -254,10 +255,10 @@ export function WriteupsIndexPage({ plainView }: WriteupPageProps) {
           ) : (
             <div
               data-writeups-index-state="empty"
-              className="border-t border-[#262C36] pt-6 space-y-6 font-data-mono text-xs sm:text-sm"
+              className="border-t border-[var(--border-subtle)] pt-6 space-y-6 font-data-mono text-xs sm:text-sm"
             >
               {isRenderableText(SITE_CONFIG.writeupsConfig.emptyStateLine) && (
-                <p className="leading-relaxed text-[#E8E4DA]">
+                <p className="leading-relaxed text-[var(--text-primary)]">
                   {SITE_CONFIG.writeupsConfig.emptyStateLine}
                 </p>
               )}
@@ -267,7 +268,7 @@ export function WriteupsIndexPage({ plainView }: WriteupPageProps) {
                   href={content.links.tryhackme}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex min-h-[44px] items-center py-1 text-[#4FD1D9] underline decoration-[#4FD1D9]/40 underline-offset-4 transition-colors hover:text-[#E8E4DA] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9]"
+                  className="inline-flex min-h-[44px] items-center py-1 text-[var(--accent)] underline decoration-[var(--accent)]/40 underline-offset-4 transition-colors hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
                 >
                   {SITE_CONFIG.writeupsConfig.emptyStateProfileLabel} ↗
                 </a>
@@ -297,22 +298,22 @@ export function WriteupDetailPage({
 
   if (!entry) {
     return (
-      <div className="relative min-h-[100svh] w-full overflow-x-hidden bg-[#0B0D10] pt-24 pb-20 text-[#E8E4DA]">
+      <div className="relative min-h-[100svh] w-full overflow-x-hidden bg-[var(--bg)] pt-24 pb-20 text-[var(--text-primary)]">
         <StaticReadingBackdrop plainView={plainView} />
         <main id="main-content" className="relative z-10 mx-auto w-full max-w-[70ch] px-4 sm:px-8">
-          <div className="bg-[#0B0D10]/95 p-5 sm:p-8 border-l border-[#262C36] font-data-mono">
+          <div className="bg-[var(--bg)] p-5 sm:p-8 border-l border-[var(--border-subtle)] font-data-mono">
             <div className="mb-4">
               <Link
                 to={`${SITE_CONFIG.routing.writeupsBasePath}${location.search}`}
-                className="inline-flex min-h-[44px] items-center text-xs text-[#4FD1D9] underline decoration-[#4FD1D9]/40 underline-offset-4 transition-colors hover:text-[#E8E4DA]"
+                className="inline-flex min-h-[44px] items-center text-xs text-[var(--accent)] underline decoration-[var(--accent)]/40 underline-offset-4 transition-colors hover:text-[var(--text-primary)]"
               >
                 ← {SITE_CONFIG.writeupsConfig.backToAllLabel}
               </Link>
             </div>
-            <h1 className="mb-3 font-display-serif text-4xl text-[#E8E4DA]">
+            <h1 className="mb-3 font-display-serif text-4xl text-[var(--text-primary)]">
               Write-up not found
             </h1>
-            <p className="text-xs sm:text-sm text-[#9A968E]">
+            <p className="text-xs sm:text-sm text-[var(--text-muted)]">
               No write-up entry matches slug “{slug}”.
             </p>
           </div>
@@ -331,14 +332,14 @@ export function WriteupDetailPage({
       : SITE_CONFIG.writeupsConfig.originalResearchBanner;
 
   return (
-    <div className="relative min-h-[100svh] w-full overflow-x-hidden bg-[#0B0D10] pt-24 pb-24 text-[#E8E4DA]">
+    <div className="relative min-h-[100svh] w-full overflow-x-hidden bg-[var(--bg)] pt-24 pb-24 text-[var(--text-primary)]">
       <StaticReadingBackdrop plainView={plainView} />
 
       <div className="relative z-10 mx-auto w-full max-w-6xl px-4 sm:px-8 lg:px-12">
         <div className="mb-4 font-data-mono text-xs">
           <Link
             to={`${SITE_CONFIG.routing.writeupsBasePath}${location.search}`}
-            className="inline-flex min-h-[44px] items-center text-[#4FD1D9] underline decoration-[#4FD1D9]/40 underline-offset-4 transition-colors hover:text-[#E8E4DA] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9]"
+            className="inline-flex min-h-[44px] items-center text-[var(--accent)] underline decoration-[var(--accent)]/40 underline-offset-4 transition-colors hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
           >
             ← {SITE_CONFIG.writeupsConfig.backToAllLabel}
           </Link>
@@ -346,33 +347,33 @@ export function WriteupDetailPage({
 
         <div className="grid grid-cols-1 gap-10 lg:grid-cols-12 items-start">
           {/* Main ~70ch reading column */}
-          <article id="main-content" className="lg:col-span-8 w-full max-w-[70ch] bg-[#0B0D10]/95">
+          <article id="main-content" className="lg:col-span-8 w-full max-w-[70ch] bg-[var(--bg)]">
             {/* Top visible status banner controlled by "type": "guided-lab" | "original" */}
             {isRenderableText(bannerText) && (
               <div
                 data-writeup-banner={entry.type}
-                className="mb-8 border-l-2 border-[#4FD1D9] bg-[#0B0D10] px-4 py-3 font-data-mono text-xs leading-relaxed text-[#E8E4DA]"
+                className="mb-8 border-l-2 border-[var(--accent)] bg-[var(--bg)] px-4 py-3 font-data-mono text-xs leading-relaxed text-[var(--text-primary)]"
               >
                 {bannerText}
               </div>
             )}
 
             {/* Header: Kicker (platform), Title in Instrument Serif, Meta line, Room link, Tags */}
-            <header className="mb-8 border-b border-[#262C36] pb-6">
+            <header className="mb-8 border-b border-[var(--border-subtle)] pb-6">
               {isRenderableText(entry.platform) && (
-                <p className="mb-2 font-data-mono text-xs tracking-widest text-[#4FD1D9]">
+                <p className="mb-2 font-data-mono text-xs tracking-widest text-[var(--accent)]">
                   {entry.platform}
                 </p>
               )}
 
-              <h1 className="mb-4 font-display-serif text-[clamp(2.35rem,5.5vw,4.25rem)] font-normal leading-[1.02] tracking-tight text-[#E8E4DA]">
+              <h1 className="mb-4 font-display-serif text-[clamp(2.35rem,5.5vw,4.25rem)] font-normal leading-[1.02] tracking-tight text-[var(--text-primary)]">
                 {entry.title}
               </h1>
 
               {/* Meta line: platform, status, date, estimated reading time, room link */}
-              <div className="mb-4 flex flex-wrap items-center gap-x-2.5 gap-y-1 font-data-mono text-xs text-[#9A968E]">
+              <div className="mb-4 flex flex-wrap items-center gap-x-2.5 gap-y-1 font-data-mono text-xs text-[var(--text-muted)]">
                 {isRenderableText(entry.platform) && (
-                  <span className="text-[#E8E4DA]">{entry.platform}</span>
+                  <span className="text-[var(--text-primary)]">{entry.platform}</span>
                 )}
 
                 {isRenderableText(entry.status) && (
@@ -403,7 +404,7 @@ export function WriteupDetailPage({
                       href={entry.roomUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex min-h-[44px] items-center py-1 text-[#4FD1D9] underline decoration-[#4FD1D9]/40 underline-offset-4 transition-colors hover:text-[#E8E4DA] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4FD1D9]"
+                      className="inline-flex min-h-[44px] items-center py-1 text-[var(--accent)] underline decoration-[var(--accent)]/40 underline-offset-4 transition-colors hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
                     >
                       Room link ↗
                     </a>
@@ -412,13 +413,13 @@ export function WriteupDetailPage({
               </div>
 
               {isRenderableText(entry.summary) && (
-                <p className="mb-4 font-data-mono text-xs sm:text-sm leading-relaxed text-[#E8E4DA]/90">
+                <p className="mb-4 font-data-mono text-xs sm:text-sm leading-relaxed text-[var(--text-primary)]">
                   {entry.summary}
                 </p>
               )}
 
               {entry.tags.length > 0 && (
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-data-mono text-xs text-[#9A968E]">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-data-mono text-xs text-[var(--text-muted)]">
                   {entry.tags.map((tag, idx) => (
                     <span key={tag} className="inline-flex items-center gap-2">
                       {idx > 0 && <span aria-hidden="true">·</span>}
@@ -433,9 +434,9 @@ export function WriteupDetailPage({
             {renderableSections.length > 0 && (
               <nav
                 aria-label="Table of contents (mobile)"
-                className="mb-8 border border-[#262C36] bg-[#0B0D10] p-4 font-data-mono text-xs lg:hidden"
+                className="mb-8 border border-[var(--border-subtle)] bg-[var(--bg)] p-4 font-data-mono text-xs lg:hidden"
               >
-                <div className="mb-2 text-[11px] tracking-wider text-[#9A968E]">
+                <div className="mb-2 text-[11px] tracking-wider text-[var(--text-muted)]">
                   contents
                 </div>
                 <ol className="space-y-1">
@@ -449,7 +450,7 @@ export function WriteupDetailPage({
                             onScrollToTarget(`#${sec.id}`);
                           }
                         }}
-                        className="inline-flex min-h-[44px] items-center text-[#E8E4DA] transition-colors hover:text-[#4FD1D9]"
+                        className="inline-flex min-h-[44px] items-center text-[var(--text-primary)] transition-colors hover:text-[var(--accent)]"
                       >
                         {String(idx + 1).padStart(2, '0')}. {sec.heading}
                       </a>
@@ -470,23 +471,23 @@ export function WriteupDetailPage({
                     key={sec.key}
                     id={sec.id}
                     data-writeup-section={sec.key}
-                    className="scroll-mt-24 border-b border-[#262C36]/60 pb-8 last:border-b-0"
+                    className="scroll-mt-24 border-b border-[var(--border-subtle)] pb-8 last:border-b-0"
                   >
-                    <h2 className="mb-4 font-display-serif text-2xl sm:text-3xl font-normal text-[#E8E4DA]">
+                    <h2 className="mb-4 font-display-serif text-2xl sm:text-3xl font-normal text-[var(--text-primary)]">
                       {sec.heading}
                     </h2>
 
                     {sec.paragraphs.map((paragraph, pIdx) => (
                       <p
                         key={pIdx}
-                        className="mb-3 leading-relaxed text-[#E8E4DA]/90"
+                        className="mb-3 leading-relaxed text-[var(--text-primary)]"
                       >
                         {paragraph}
                       </p>
                     ))}
 
                     {sec.steps.length > 0 && (
-                      <ol className="my-4 list-decimal space-y-2 pl-5 leading-relaxed text-[#E8E4DA]/90">
+                      <ol className="my-4 list-decimal space-y-2 pl-5 leading-relaxed text-[var(--text-primary)]">
                         {sec.steps.map((step, sIdx) => (
                           <li key={sIdx}>{step}</li>
                         ))}
@@ -500,7 +501,7 @@ export function WriteupDetailPage({
                     {sec.screenshots.map((shot, imgIdx) => (
                       <figure
                         key={imgIdx}
-                        className="my-5 border border-[#262C36] bg-[#0B0D10] p-2"
+                        className="my-5 border border-[var(--border-subtle)] bg-[var(--bg)] p-2"
                       >
                         <img
                           src={shot.src}
@@ -509,7 +510,7 @@ export function WriteupDetailPage({
                           className="w-full h-auto"
                         />
                         {isRenderableText(shot.caption) && (
-                          <figcaption className="mt-2 px-1 text-xs text-[#9A968E]">
+                          <figcaption className="mt-2 px-1 text-xs text-[var(--text-muted)]">
                             {shot.caption}
                           </figcaption>
                         )}
@@ -521,17 +522,17 @@ export function WriteupDetailPage({
             ) : (
               <div
                 data-writeup-sections-state="empty-draft"
-                className="space-y-4 border border-[#262C36] bg-[#0B0D10] p-5 font-data-mono text-xs sm:text-sm"
+                className="space-y-4 border border-[var(--border-subtle)] bg-[var(--bg)] p-5 font-data-mono text-xs sm:text-sm"
               >
                 {isRenderableText(SITE_CONFIG.writeupsConfig.emptyStateLine) && (
-                  <p className="leading-relaxed text-[#E8E4DA]">
+                  <p className="leading-relaxed text-[var(--text-primary)]">
                     {SITE_CONFIG.writeupsConfig.emptyStateLine}
                   </p>
                 )}
-                <p className="leading-relaxed text-[#9A968E]">
-                  Status in data file: <span className="text-[#E8E4DA]">published: false</span>.
+                <p className="leading-relaxed text-[var(--text-muted)]">
+                  Status in data file: <span className="text-[var(--text-primary)]">published: false</span>.
                   Detailed walkthrough sections remain hidden until populated in{' '}
-                  <span className="text-[#E8E4DA]">src/content.js</span>.
+                  <span className="text-[var(--text-primary)]">src/content.js</span>.
                 </p>
 
                 <CodeBlockView
@@ -545,18 +546,18 @@ export function WriteupDetailPage({
             )}
 
             {/* Previous / Next write-up links at the bottom */}
-            <footer className="mt-12 border-t border-[#262C36] pt-6 font-data-mono text-xs">
+            <footer className="mt-12 border-t border-[var(--border-subtle)] pt-6 font-data-mono text-xs">
               <div className="flex flex-wrap items-center justify-between gap-4">
                 <div>
                   {previous ? (
                     <Link
                       to={`${buildWriteupHref(previous.slug)}${location.search}`}
-                      className="inline-flex min-h-[44px] items-center text-[#4FD1D9] underline decoration-[#4FD1D9]/40 underline-offset-4 transition-colors hover:text-[#E8E4DA]"
+                      className="inline-flex min-h-[44px] items-center text-[var(--accent)] underline decoration-[var(--accent)]/40 underline-offset-4 transition-colors hover:text-[var(--text-primary)]"
                     >
                       ← Previous: {previous.title}
                     </Link>
                   ) : (
-                    <span className="inline-flex min-h-[44px] items-center text-[#9A968E]">
+                    <span className="inline-flex min-h-[44px] items-center text-[var(--text-muted)]">
                       ← Previous: none
                     </span>
                   )}
@@ -564,7 +565,7 @@ export function WriteupDetailPage({
 
                 <Link
                   to={`${SITE_CONFIG.routing.writeupsBasePath}${location.search}`}
-                  className="inline-flex min-h-[44px] items-center text-[#E8E4DA] underline decoration-[#262C36] underline-offset-4 transition-colors hover:text-[#4FD1D9]"
+                  className="inline-flex min-h-[44px] items-center text-[var(--text-primary)] underline decoration-[var(--border-subtle)] underline-offset-4 transition-colors hover:text-[var(--accent)]"
                 >
                   {SITE_CONFIG.writeupsConfig.backToAllLabel}
                 </Link>
@@ -573,12 +574,12 @@ export function WriteupDetailPage({
                   {next ? (
                     <Link
                       to={`${buildWriteupHref(next.slug)}${location.search}`}
-                      className="inline-flex min-h-[44px] items-center text-[#4FD1D9] underline decoration-[#4FD1D9]/40 underline-offset-4 transition-colors hover:text-[#E8E4DA]"
+                      className="inline-flex min-h-[44px] items-center text-[var(--accent)] underline decoration-[var(--accent)]/40 underline-offset-4 transition-colors hover:text-[var(--text-primary)]"
                     >
                       Next: {next.title} →
                     </Link>
                   ) : (
-                    <span className="inline-flex min-h-[44px] items-center text-[#9A968E]">
+                    <span className="inline-flex min-h-[44px] items-center text-[var(--text-muted)]">
                       Next: none →
                     </span>
                   )}
@@ -591,9 +592,9 @@ export function WriteupDetailPage({
           {renderableSections.length > 0 && (
             <aside
               aria-label="Table of contents"
-              className="hidden lg:block lg:col-span-4 sticky top-24 border-l border-[#262C36] pl-6 font-data-mono text-xs"
+              className="hidden lg:block lg:col-span-4 sticky top-24 border-l border-[var(--border-subtle)] bg-[var(--bg)] pl-6 font-data-mono text-xs"
             >
-              <div className="mb-3 text-[11px] tracking-wider text-[#9A968E]">
+              <div className="mb-3 text-[11px] tracking-wider text-[var(--text-muted)]">
                 on this page
               </div>
               <ol className="space-y-2">
@@ -607,7 +608,7 @@ export function WriteupDetailPage({
                           onScrollToTarget(`#${sec.id}`);
                         }
                       }}
-                      className="inline-flex min-h-[36px] items-center text-[#9A968E] transition-colors hover:text-[#4FD1D9]"
+                      className="inline-flex min-h-[36px] items-center text-[var(--text-muted)] transition-colors hover:text-[var(--accent)]"
                     >
                       {String(idx + 1).padStart(2, '0')}. {sec.heading}
                     </a>
