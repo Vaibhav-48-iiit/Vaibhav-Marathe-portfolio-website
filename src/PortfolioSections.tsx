@@ -23,6 +23,9 @@ import {
   computeRevealStaggerDelayMs,
   createInitialSectionVisibilityMap,
   isSaveDataEnabled,
+  MORPH_ARRIVAL_INTERSECTION_THRESHOLD,
+  MORPH_SETTLE_DURATION_MS,
+  MORPH_VELOCITY_THRESHOLD,
   resolveDominantArrivedSection,
   resolveInitialHashSectionId,
   shouldDisableSectionReveal,
@@ -59,19 +62,27 @@ export function isPortfolioSectionId(id: string): id is SectionId {
 }
 
 export interface ScrollArrivalController {
-  /** Current absolute scroll velocity from Lenis */
+  /** Current absolute scroll velocity from Lenis (used by particle morph arrival) */
   velocity: number;
-  /** Timestamp (performance.now()) when velocity last dropped to <= velocityThreshold (0 if already settled) */
+  /** Timestamp (performance.now()) when velocity last dropped to <= morph velocity threshold */
   settledSinceMs: number;
+  /** True while a programmatic jump (nav link, Menu link, Back to top, lenis.scrollTo, hash load) is active */
+  isProgrammaticScroll: boolean;
+  /** True on initial top load or right after a programmatic jump lands until normal user scroll moves */
+  awaitingUserScroll: boolean;
+  /** Scroll Y recorded when the last programmatic jump ended */
+  lastProgrammaticEndScrollY: number;
   /** Destination section ID while a Lenis scrollTo (nav/Menu click) is in flight, or null */
   inTransitTargetId: SectionId | null;
-  /** Listeners invoked when velocity settles or transit state changes */
+  /** Listeners invoked when velocity settles or transit state changes (morph arrival) */
   settleListeners: Set<() => void>;
-  /** Immediate section reveal callback invoked when a Lenis scrollTo finishes */
+  /** Listeners invoked when normal user scrolling begins or resumes (section reveal) */
+  normalScrollListeners: Set<() => void>;
+  /** Immediate section reveal callback invoked when a programmatic jump finishes */
   onLandSection?: (sectionId: SectionId) => void;
   /** Currently arrived section ID for the repeatable particle morph state machine */
   arrivedSectionId: SectionId | null;
-  /** Live IntersectionObserver visibility map across all 6 portfolio sections */
+  /** Live IntersectionObserver visibility map across all 6 portfolio sections (morph logic) */
   inViewMap: SectionVisibilityMap;
 }
 
@@ -311,9 +322,23 @@ export function PortfolioSections({
   });
 
   const revealedSetRef = useRef<Set<RevealSectionId>>(new Set());
+  // Visibility map for repeatable particle morph arrival (0.25 threshold, no rootMargin — unchanged)
   const inViewRef = useRef<
     Record<SectionId, { isIntersecting: boolean; ratio: number }>
   >(createInitialSectionVisibilityMap());
+  // Visibility map for fast section text reveals (0.05 threshold, 0px 0px 12% 0px rootMargin)
+  const revealInViewRef = useRef<
+    Record<
+      RevealSectionId,
+      { isIntersecting: boolean; ratio: number; realViewportRatio: number }
+    >
+  >({
+    background: { isIntersecting: false, ratio: 0, realViewportRatio: 0 },
+    skills: { isIntersecting: false, ratio: 0, realViewportRatio: 0 },
+    projects: { isIntersecting: false, ratio: 0, realViewportRatio: 0 },
+    writeups: { isIntersecting: false, ratio: 0, realViewportRatio: 0 },
+    connect: { isIntersecting: false, ratio: 0, realViewportRatio: 0 },
+  });
   const failsafeTimersRef = useRef<Partial<Record<RevealSectionId, number>>>({});
   const willChangeTimersRef = useRef<Partial<Record<RevealSectionId, number>>>(
     {},
@@ -395,81 +420,171 @@ export function PortfolioSections({
     }
   }, [animationsDisabled, revealAllInstantly]);
 
-  const isVelocitySettledNow = useCallback((): boolean => {
+  // Preserved velocity settle check strictly for the particle morph state machine (unchanged)
+  const isVelocitySettledForMorph = useCallback((): boolean => {
     const ctrl = scrollArrivalRef?.current;
     if (!ctrl) return true;
-    const { velocityThreshold, settleDurationMs } = SITE_CONFIG.sectionReveal;
-    if (ctrl.velocity > velocityThreshold) return false;
+    if (ctrl.velocity > MORPH_VELOCITY_THRESHOLD) return false;
     if (ctrl.settledSinceMs <= 0) return true;
     const now =
       typeof performance !== 'undefined' ? performance.now() : Date.now();
-    return now - ctrl.settledSinceMs >= settleDurationMs;
+    return now - ctrl.settledSinceMs >= MORPH_SETTLE_DURATION_MS;
   }, [scrollArrivalRef]);
 
-  const evaluateArrivals = useCallback(() => {
+  const evaluateMorphArrival = useCallback(() => {
     const ctrl = scrollArrivalRef?.current;
-    const inTransitTargetId = ctrl?.inTransitTargetId ?? null;
-    const settled = isVelocitySettledNow();
+    if (!ctrl) return;
+    const inTransitTargetId = ctrl.inTransitTargetId ?? null;
+    const settled = isVelocitySettledForMorph();
 
-    // 1. Update repeatable arrivedSectionId for the particle morph state machine
-    if (ctrl) {
-      ctrl.inViewMap = inViewRef.current;
-      const scrollY =
-        typeof window !== 'undefined'
-          ? window.scrollY ||
-            document.documentElement.scrollTop ||
-            document.body.scrollTop ||
-            0
-          : 0;
-      const vh =
-        typeof window !== 'undefined' ? Math.max(1, window.innerHeight) : 800;
-      const docH =
-        typeof document !== 'undefined'
-          ? Math.max(
-              document.documentElement.scrollHeight,
-              document.body.scrollHeight,
-              vh * 2,
-            )
-          : 4800;
-      const heroProgress = Math.min(
-        1,
-        Math.max(0, scrollY / (vh * SITE_CONFIG.scroll.dispersionScrollVh)),
+    ctrl.inViewMap = inViewRef.current;
+    const scrollY =
+      typeof window !== 'undefined'
+        ? window.scrollY ||
+          document.documentElement.scrollTop ||
+          document.body.scrollTop ||
+          0
+        : 0;
+    const vh =
+      typeof window !== 'undefined' ? Math.max(1, window.innerHeight) : 800;
+    const docH =
+      typeof document !== 'undefined'
+        ? Math.max(
+            document.documentElement.scrollHeight,
+            document.body.scrollHeight,
+            vh * 2,
+          )
+        : 4800;
+    const heroProgress = Math.min(
+      1,
+      Math.max(0, scrollY / (vh * SITE_CONFIG.scroll.dispersionScrollVh)),
+    );
+    const pageProgress = Math.min(
+      1,
+      Math.max(0, scrollY / Math.max(1, docH - vh)),
+    );
+
+    ctrl.arrivedSectionId = resolveDominantArrivedSection({
+      inViewMap: inViewRef.current,
+      heroProgress,
+      pageProgress,
+      inTransitTargetId,
+      isVelocitySettled: settled,
+      currentArrivedSection: ctrl.arrivedSectionId,
+    });
+  }, [isVelocitySettledForMorph, scrollArrivalRef]);
+
+  const getLiveUnobstructedViewportRatio = useCallback(
+    (secId: RevealSectionId): number => {
+      if (typeof window === 'undefined' || typeof document === 'undefined') {
+        return 0;
+      }
+      const el = document.getElementById(secId);
+      if (!el) return 0;
+      const vh = Math.max(1, window.innerHeight || 800);
+      const headerPx = Math.abs(SITE_CONFIG.lenis.headerOffsetPx);
+      const rect = el.getBoundingClientRect();
+      const clampedTop = Math.max(headerPx, rect.top);
+      const clampedBottom = Math.min(vh, rect.bottom);
+      const realVisiblePx = Math.max(0, clampedBottom - clampedTop);
+      if (realVisiblePx <= 0) return 0;
+      return Math.max(
+        rect.height > 0 ? realVisiblePx / rect.height : 0,
+        realVisiblePx / vh,
       );
-      const pageProgress = Math.min(
-        1,
-        Math.max(0, scrollY / Math.max(1, docH - vh)),
-      );
+    },
+    [],
+  );
 
-      ctrl.arrivedSectionId = resolveDominantArrivedSection({
-        inViewMap: inViewRef.current,
-        heroProgress,
-        pageProgress,
-        inTransitTargetId,
-        isVelocitySettled: settled,
-        currentArrivedSection: ctrl.arrivedSectionId,
-      });
-    }
+  const scheduleFailsafeIfVisible = useCallback(
+    (secId: RevealSectionId) => {
+      if (animationsDisabledRef.current || revealedSetRef.current.has(secId)) {
+        clearFailsafeTimer(secId);
+        return;
+      }
+      const ctrl = scrollArrivalRef?.current;
+      if (ctrl?.isProgrammaticScroll) {
+        clearFailsafeTimer(secId);
+        return;
+      }
+      const threshold = SITE_CONFIG.sectionReveal.intersectionThreshold;
+      const liveRatio = getLiveUnobstructedViewportRatio(secId);
+      if (liveRatio >= threshold) {
+        if (failsafeTimersRef.current[secId] === undefined) {
+          failsafeTimersRef.current[secId] = window.setTimeout(() => {
+            delete failsafeTimersRef.current[secId];
+            const latestCtrl = scrollArrivalRef?.current;
+            const currentRatio = getLiveUnobstructedViewportRatio(secId);
+            if (
+              !latestCtrl?.isProgrammaticScroll &&
+              !revealedSetRef.current.has(secId) &&
+              currentRatio >= threshold
+            ) {
+              revealSection(secId, 'animate');
+            }
+          }, SITE_CONFIG.sectionReveal.failsafeTimeoutMs);
+        }
+      } else {
+        clearFailsafeTimer(secId);
+      }
+    },
+    [
+      clearFailsafeTimer,
+      getLiveUnobstructedViewportRatio,
+      revealSection,
+      scrollArrivalRef,
+    ],
+  );
 
-    // 2. Evaluate one-time section text reveal animations
+  /**
+   * Evaluates one-time section text reveals in Normal Scrolling mode.
+   * No velocity check or settle wait: reveals immediately as soon as >= 5% enters
+   * the IntersectionObserver root (0px 0px 12% 0px).
+   * Suppressed while a programmatic jump is active (`isProgrammaticScroll === true`)
+   * or before normal user scrolling begins after initial load / programmatic landing.
+   */
+  const evaluateRevealArrivals = useCallback(() => {
     if (animationsDisabledRef.current) return;
+    const ctrl = scrollArrivalRef?.current;
+    const isProgrammaticScroll = ctrl?.isProgrammaticScroll ?? false;
+    const awaitingUserScroll = ctrl?.awaitingUserScroll ?? false;
+    const inTransitTargetId = ctrl?.inTransitTargetId ?? null;
+
+    if (isProgrammaticScroll) {
+      for (const secId of REVEAL_SECTION_IDS) {
+        clearFailsafeTimer(secId);
+      }
+      return;
+    }
 
     for (const secId of REVEAL_SECTION_IDS) {
       if (revealedSetRef.current.has(secId)) continue;
-      const entry = inViewRef.current[secId];
-      if (
-        shouldTriggerSectionArrival({
-          sectionId: secId,
-          alreadyRevealed: revealedSetRef.current.has(secId),
-          isIntersecting: entry.isIntersecting,
-          intersectionRatio: entry.ratio,
-          inTransitTargetId,
-          isVelocitySettled: settled,
-        })
-      ) {
-        revealSection(secId, 'animate');
+      const entry = revealInViewRef.current[secId];
+
+      if (!awaitingUserScroll) {
+        if (
+          shouldTriggerSectionArrival({
+            sectionId: secId,
+            alreadyRevealed: false,
+            isIntersecting: entry.isIntersecting,
+            intersectionRatio: entry.ratio,
+            isProgrammaticScroll: false,
+            inTransitTargetId,
+          })
+        ) {
+          revealSection(secId, 'animate');
+          continue;
+        }
       }
+
+      scheduleFailsafeIfVisible(secId);
     }
-  }, [isVelocitySettledNow, revealSection, scrollArrivalRef]);
+  }, [
+    clearFailsafeTimer,
+    revealSection,
+    scheduleFailsafeIfVisible,
+    scrollArrivalRef,
+  ]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -483,22 +598,36 @@ export function PortfolioSections({
       }
     }
 
-    // Register velocity-settle and scrollTo-land callbacks from AppShell's Lenis loop
+    // Register morph velocity-settle, normal-scroll, and programmatic landing callbacks
     const ctrl = scrollArrivalRef?.current;
     const onSettle = () => {
-      evaluateArrivals();
+      evaluateMorphArrival();
+    };
+    const onNormalScroll = () => {
+      evaluateRevealArrivals();
     };
     const onLandSection = (landedId: SectionId) => {
       if (ctrl) {
         ctrl.arrivedSectionId = landedId;
       }
+      for (const secId of REVEAL_SECTION_IDS) {
+        clearFailsafeTimer(secId);
+      }
       if (isRevealSectionId(landedId)) {
         revealSection(landedId, 'animate');
+      }
+      // After programmatic landing, only schedule 200ms failsafe for any other section
+      // that is genuinely >= 5% visible inside the unobstructed viewport (below header)
+      for (const secId of REVEAL_SECTION_IDS) {
+        if (secId !== landedId) {
+          scheduleFailsafeIfVisible(secId);
+        }
       }
     };
 
     if (ctrl) {
       ctrl.settleListeners.add(onSettle);
+      ctrl.normalScrollListeners.add(onNormalScroll);
       ctrl.onLandSection = onLandSection;
     }
 
@@ -507,10 +636,12 @@ export function PortfolioSections({
       return;
     }
 
-    let observer: IntersectionObserver | null = null;
+    let morphObserver: IntersectionObserver | null = null;
+    let revealObserver: IntersectionObserver | null = null;
     try {
-      const threshold = SITE_CONFIG.sectionReveal.intersectionThreshold;
-      observer = new IntersectionObserver(
+      // 1. Morph observer: unchanged 0.25 viewport threshold with no rootMargin
+      const morphThreshold = MORPH_ARRIVAL_INTERSECTION_THRESHOLD;
+      morphObserver = new IntersectionObserver(
         (entries) => {
           try {
             const vh = Math.max(1, window.innerHeight || 800);
@@ -518,10 +649,6 @@ export function PortfolioSections({
               const secId = entry.target.id;
               if (!isPortfolioSectionId(secId)) continue;
 
-              // Compute effective visibility ratio as the larger of entry.intersectionRatio
-              // (fraction of section visible) and visibleHeight / viewportHeight (fraction of
-              // viewport occupied by the section), so tall sections (> 2x viewport height on mobile)
-              // still qualify cleanly when at least 25% of the viewport shows the section.
               const visibleHeight = entry.intersectionRect
                 ? entry.intersectionRect.height
                 : 0;
@@ -535,43 +662,78 @@ export function PortfolioSections({
                 isIntersecting: entry.isIntersecting,
                 ratio: effectiveRatio,
               };
-
-              if (isRevealSectionId(secId)) {
-                if (
-                  entry.isIntersecting &&
-                  effectiveRatio >= threshold &&
-                  !revealedSetRef.current.has(secId)
-                ) {
-                  // Failsafe: if a section has not been revealed within 3 seconds of being
-                  // at least 25% in view, reveal it anyway.
-                  if (failsafeTimersRef.current[secId] === undefined) {
-                    failsafeTimersRef.current[secId] = window.setTimeout(() => {
-                      delete failsafeTimersRef.current[secId];
-                      if (!revealedSetRef.current.has(secId)) {
-                        revealSection(secId, 'animate');
-                      }
-                    }, SITE_CONFIG.sectionReveal.failsafeTimeoutMs);
-                  }
-                } else {
-                  clearFailsafeTimer(secId);
-                }
-              }
             }
 
-            evaluateArrivals();
+            evaluateMorphArrival();
           } catch {
-            revealAllInstantly();
+            // Ignore morph observer errors safely
           }
         },
         {
-          threshold: [0, 0.1, 0.2, threshold, 0.4, 0.6, 0.8, 1],
+          threshold: [0, 0.1, 0.2, morphThreshold, 0.4, 0.6, 0.8, 1],
         },
       );
 
       for (const secId of ALL_PORTFOLIO_SECTION_IDS) {
         const el = document.getElementById(secId);
         if (el) {
-          observer.observe(el);
+          morphObserver.observe(el);
+        }
+      }
+
+      // 2. Reveal observer: 0.05 threshold + 0px 0px 12% 0px rootMargin for immediate fade on normal scroll
+      const revealThreshold = SITE_CONFIG.sectionReveal.intersectionThreshold;
+      const headerPx = Math.abs(SITE_CONFIG.lenis.headerOffsetPx);
+      revealObserver = new IntersectionObserver(
+        (entries) => {
+          try {
+            const vh = Math.max(1, window.innerHeight || 800);
+            for (const entry of entries) {
+              const secId = entry.target.id;
+              if (!isRevealSectionId(secId)) continue;
+
+              const visibleHeight = entry.intersectionRect
+                ? entry.intersectionRect.height
+                : 0;
+              const viewportRatio = visibleHeight / vh;
+              const effectiveRatio = Math.max(
+                entry.intersectionRatio,
+                viewportRatio,
+              );
+
+              // Fraction visible inside the unobstructed viewport [headerPx, vh]
+              // (excludes pixels tucked behind the fixed header or below the fold in the +12% margin)
+              const rect = entry.boundingClientRect;
+              const clampedTop = Math.max(headerPx, rect.top);
+              const clampedBottom = Math.min(vh, rect.bottom);
+              const realVisiblePx = Math.max(0, clampedBottom - clampedTop);
+              const realViewportRatio = Math.max(
+                rect.height > 0 ? realVisiblePx / rect.height : 0,
+                realVisiblePx / vh,
+              );
+
+              revealInViewRef.current[secId] = {
+                isIntersecting: entry.isIntersecting,
+                ratio: effectiveRatio,
+                realViewportRatio,
+              };
+            }
+
+            evaluateRevealArrivals();
+          } catch {
+            revealAllInstantly();
+          }
+        },
+        {
+          threshold: [0, revealThreshold, 0.1, 0.25, 0.5, 1],
+          rootMargin: SITE_CONFIG.sectionReveal.rootMargin,
+        },
+      );
+
+      for (const secId of REVEAL_SECTION_IDS) {
+        const el = document.getElementById(secId);
+        if (el) {
+          revealObserver.observe(el);
         }
       }
 
@@ -584,11 +746,15 @@ export function PortfolioSections({
     const willChangeTimers = willChangeTimersRef.current;
 
     return () => {
-      if (observer) {
-        observer.disconnect();
+      if (morphObserver) {
+        morphObserver.disconnect();
+      }
+      if (revealObserver) {
+        revealObserver.disconnect();
       }
       if (ctrl) {
         ctrl.settleListeners.delete(onSettle);
+        ctrl.normalScrollListeners.delete(onNormalScroll);
         if (ctrl.onLandSection === onLandSection) {
           ctrl.onLandSection = undefined;
         }
@@ -608,16 +774,18 @@ export function PortfolioSections({
     };
   }, [
     clearFailsafeTimer,
-    evaluateArrivals,
+    evaluateMorphArrival,
+    evaluateRevealArrivals,
     revealAllInstantly,
     revealSection,
+    scheduleFailsafeIfVisible,
     scrollArrivalRef,
   ]);
 
   /**
    * Builds inline style and data attributes for an ordered reveal item inside a section.
-   * Uses ONLY opacity and transform (translateY 12px -> 0) with 500ms ease-out and
-   * 40ms stagger capped at 8 items. Removes will-change after the animation ends.
+   * Uses ONLY opacity and transform (translateY 8px -> 0) with 300ms ease-out and
+   * 20ms stagger capped at 5 items (~380ms total). Removes will-change after the animation ends.
    */
   const getRevealItemProps = (
     secId: RevealSectionId,
@@ -732,7 +900,7 @@ export function PortfolioSections({
               {sectionMeta.background.kicker}
             </p>
             <h2
-              {...getRevealItemProps('background', 1)}
+              {...getRevealItemProps('background', 0)}
               className="mb-8 sm:mb-10 font-display-serif text-[clamp(2.35rem,5.5vw,4.5rem)] font-normal leading-[1.02] tracking-tight text-[var(--text-primary)]"
             >
               {sectionMeta.background.title}
@@ -743,7 +911,7 @@ export function PortfolioSections({
               <div className="lg:col-span-5 space-y-8">
                 {isRenderableText(content.background.introDraft) && (
                   <p
-                    {...getRevealItemProps('background', 2)}
+                    {...getRevealItemProps('background', 0)}
                     className="font-data-mono text-xs sm:text-sm leading-relaxed text-[var(--text-primary)]"
                   >
                     {content.background.introDraft}
@@ -752,7 +920,7 @@ export function PortfolioSections({
 
                 {isRenderableText(content.background.taglinePullQuote) && (
                   <blockquote
-                    {...getRevealItemProps('background', 3)}
+                    {...getRevealItemProps('background', 1)}
                     className="border-t border-b border-[var(--border-subtle)] py-5 font-display-serif text-2xl sm:text-3xl italic leading-snug text-[var(--text-primary)]"
                   >
                     “{content.background.taglinePullQuote}”
@@ -763,7 +931,7 @@ export function PortfolioSections({
               {/* Right Column: Vertical mono changelog + status line */}
               <div className="lg:col-span-7 font-data-mono">
                 <div
-                  {...getRevealItemProps('background', 3)}
+                  {...getRevealItemProps('background', 1)}
                   className="mb-3 text-xs tracking-wider text-[var(--text-muted)]"
                 >
                   changelog
@@ -776,7 +944,7 @@ export function PortfolioSections({
                     return (
                       <li
                         key={entry.id}
-                        {...getRevealItemProps('background', 4 + idx)}
+                        {...getRevealItemProps('background', 2 + idx)}
                         className="relative grid grid-cols-[3rem_1fr] sm:grid-cols-[4rem_1fr] gap-2.5 sm:gap-4 items-baseline text-xs sm:text-sm"
                       >
                         <span
@@ -810,7 +978,7 @@ export function PortfolioSections({
 
                 {isRenderableText(content.background.statusLine) && (
                   <p
-                    {...getRevealItemProps('background', 7)}
+                    {...getRevealItemProps('background', 4)}
                     className="mt-8 border-t border-[var(--border-subtle)] pt-4 text-xs text-[var(--text-muted)]"
                   >
                     {content.background.statusLine}
@@ -842,7 +1010,7 @@ export function PortfolioSections({
                   {sectionMeta.skills.kicker}
                 </p>
                 <h2
-                  {...getRevealItemProps('skills', 1)}
+                  {...getRevealItemProps('skills', 0)}
                   className="font-display-serif text-[clamp(2.35rem,5.5vw,4.5rem)] font-normal leading-[1.02] tracking-tight text-[var(--text-primary)]"
                 >
                   {sectionMeta.skills.title}
@@ -850,7 +1018,7 @@ export function PortfolioSections({
               </div>
 
               <div
-                {...getRevealItemProps('skills', 2)}
+                {...getRevealItemProps('skills', 0)}
                 className="flex items-center gap-4 font-data-mono text-xs text-[var(--text-muted)]"
               >
                 <span className="text-[var(--accent)]">
@@ -866,7 +1034,7 @@ export function PortfolioSections({
               {content.skills.groups.map((group, groupIdx) => (
                 <div
                   key={group.id}
-                  {...getRevealItemProps('skills', 3 + groupIdx)}
+                  {...getRevealItemProps('skills', groupIdx)}
                   className="grid grid-cols-1 gap-4 lg:grid-cols-12 lg:gap-10 items-start"
                 >
                   <h3 className="lg:col-span-3 bg-[var(--bg)] pt-2 text-xs tracking-wider text-[var(--text-muted)]">
@@ -943,7 +1111,7 @@ export function PortfolioSections({
               {sectionMeta.projects.kicker}
             </p>
             <h2
-              {...getRevealItemProps('projects', 1)}
+              {...getRevealItemProps('projects', 0)}
               className="mb-10 sm:mb-12 font-display-serif text-[clamp(2.35rem,5.5vw,4.5rem)] font-normal leading-[1.02] tracking-tight text-[var(--text-primary)]"
             >
               {sectionMeta.projects.title}
@@ -954,7 +1122,7 @@ export function PortfolioSections({
               {/* Lane 1: BUILT (Software & Systems Engineering) */}
               <div className="lg:col-span-5">
                 <div
-                  {...getRevealItemProps('projects', 2)}
+                  {...getRevealItemProps('projects', 0)}
                   className="mb-6 flex items-baseline justify-between border-b border-[var(--border-subtle)] pb-3"
                 >
                   <h3 className="font-display-serif text-3xl text-[var(--text-primary)]">
@@ -969,7 +1137,7 @@ export function PortfolioSections({
                   {content.projectsAndCtfs.built.map((proj, projIdx) => (
                     <li
                       key={proj.id}
-                      {...getRevealItemProps('projects', 3 + projIdx)}
+                      {...getRevealItemProps('projects', projIdx)}
                       className="py-6 first:pt-2"
                     >
                       <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2">
@@ -1032,7 +1200,7 @@ export function PortfolioSections({
               {/* Lane 2: BROKEN (CTFs, Guided Labs & Offensive / Defensive Practice) */}
               <div className="lg:col-span-7 lg:border-l lg:border-[var(--border-subtle)] lg:pl-10">
                 <div
-                  {...getRevealItemProps('projects', 2)}
+                  {...getRevealItemProps('projects', 0)}
                   className="mb-6 flex items-baseline justify-between border-b border-[var(--accent)]/40 pb-3"
                 >
                   <h3 className="font-display-serif text-3xl text-[var(--text-primary)]">
@@ -1053,7 +1221,7 @@ export function PortfolioSections({
                     return (
                       <li
                         key={lab.id}
-                        {...getRevealItemProps('projects', 3 + labIdx)}
+                        {...getRevealItemProps('projects', labIdx)}
                         className="py-5 first:pt-2"
                       >
                         <div className="mb-1.5 flex flex-wrap items-baseline justify-between gap-2">
@@ -1117,7 +1285,7 @@ export function PortfolioSections({
 
                 {isRenderableText(content.projectsAndCtfs.brokenCompactLine) && (
                   <p
-                    {...getRevealItemProps('projects', 7)}
+                    {...getRevealItemProps('projects', 4)}
                     className="mt-4 border-t border-[var(--border-subtle)] pt-4 font-data-mono text-xs text-[var(--text-muted)]"
                   >
                     {content.projectsAndCtfs.brokenCompactLine}
@@ -1160,7 +1328,7 @@ export function PortfolioSections({
                     {sectionMeta.writeups.kicker}
                   </p>
                   <h2
-                    {...getRevealItemProps('writeups', 1)}
+                    {...getRevealItemProps('writeups', 0)}
                     className="font-display-serif text-[clamp(2.35rem,5.5vw,4.5rem)] font-normal leading-[1.02] tracking-tight text-[var(--text-primary)]"
                   >
                     {sectionMeta.writeups.title}
@@ -1168,7 +1336,7 @@ export function PortfolioSections({
                 </div>
 
                 {isRenderableText(SITE_CONFIG.writeupsConfig.viewAllLabel) && (
-                  <div {...getRevealItemProps('writeups', 1)}>
+                  <div {...getRevealItemProps('writeups', 0)}>
                     <Link
                       to={`${SITE_CONFIG.routing.writeupsBasePath}${location.search}`}
                       className="inline-flex min-h-[44px] items-center py-1 font-data-mono text-xs text-[var(--accent)] underline decoration-[var(--accent)]/40 underline-offset-4 transition-colors hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
@@ -1189,7 +1357,7 @@ export function PortfolioSections({
                     return (
                       <li
                         key={entry.slug}
-                        {...getRevealItemProps('writeups', 2 + idx)}
+                        {...getRevealItemProps('writeups', idx)}
                         className="py-6 first:pt-2"
                       >
                         <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
@@ -1261,14 +1429,14 @@ export function PortfolioSections({
                 >
                   {isRenderableText(SITE_CONFIG.writeupsConfig.emptyStateLine) && (
                     <p
-                      {...getRevealItemProps('writeups', 2)}
+                      {...getRevealItemProps('writeups', 0)}
                       className="leading-relaxed text-[var(--text-primary)]"
                     >
                       {SITE_CONFIG.writeupsConfig.emptyStateLine}
                     </p>
                   )}
                   <div
-                    {...getRevealItemProps('writeups', 3)}
+                    {...getRevealItemProps('writeups', 1)}
                     className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs"
                   >
                     <a
@@ -1317,7 +1485,7 @@ export function PortfolioSections({
             </div>
 
             <h2
-              {...getRevealItemProps('connect', 1)}
+              {...getRevealItemProps('connect', 0)}
               className="mb-4 font-display-serif text-[clamp(2.35rem,5.5vw,4.5rem)] font-normal leading-[1.02] tracking-tight text-[var(--text-primary)]"
             >
               {content.connect.heading}
@@ -1326,7 +1494,7 @@ export function PortfolioSections({
             {/* Fix 1: Any config or content string starting with "TODO" renders nothing on the page */}
             {isRenderableText(content.connect.introLine) && (
               <p
-                {...getRevealItemProps('connect', 2)}
+                {...getRevealItemProps('connect', 0)}
                 className="mb-2 font-data-mono text-xs sm:text-sm leading-relaxed text-[var(--text-primary)]"
               >
                 {content.connect.introLine}
@@ -1336,7 +1504,7 @@ export function PortfolioSections({
             {/* Status line under it */}
             {isRenderableText(content.connect.statusLine) && (
               <p
-                {...getRevealItemProps('connect', 2)}
+                {...getRevealItemProps('connect', 0)}
                 className="mb-8 font-data-mono text-xs text-[var(--text-muted)]"
               >
                 {content.connect.statusLine}
@@ -1356,7 +1524,7 @@ export function PortfolioSections({
                 return (
                   <li
                     key={channel.id}
-                    {...getRevealItemProps('connect', 3 + idx)}
+                    {...getRevealItemProps('connect', 1 + idx)}
                     className="flex items-end sm:items-center justify-between gap-x-2 sm:gap-x-4 py-2 min-h-[48px]"
                   >
                     <a
@@ -1410,7 +1578,7 @@ export function PortfolioSections({
 
         {/* Thin footer: "Δ vaibhav.marathe", the computed year, and a link back to top */}
         <footer
-          {...getRevealItemProps('connect', 7)}
+          {...getRevealItemProps('connect', 4)}
           className="mx-auto mt-14 w-full max-w-7xl border-t border-[var(--border-subtle)] bg-[var(--bg)] pt-4 font-data-mono text-xs text-[var(--text-muted)]"
         >
           <div className="flex flex-wrap items-center justify-between gap-4">

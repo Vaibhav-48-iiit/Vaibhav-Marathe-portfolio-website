@@ -648,26 +648,26 @@ test('hasVisitedBefore and markVisited handle working and throwing storage safel
   assert.doesNotThrow(() => markVisited(brokenStorage));
 });
 
-test('Section-arrival reveal: config timings, 8-item stagger cap (<900ms), transit suppression, hash resolution, and disable conditions', () => {
+test('Section-arrival reveal: faster config timings, 5-item stagger cap (~400ms), normal-scroll immediate reveal, programmatic jump suppression, hash resolution, and disable conditions', () => {
   // 1. Config values
-  assert.equal(SITE_CONFIG.sectionReveal.durationMs, 500);
+  assert.equal(SITE_CONFIG.sectionReveal.durationMs, 300);
   assert.equal(SITE_CONFIG.sectionReveal.easing, 'ease-out');
-  assert.equal(SITE_CONFIG.sectionReveal.translateYDistancePx, 12);
-  assert.equal(SITE_CONFIG.sectionReveal.staggerMs, 40);
-  assert.equal(SITE_CONFIG.sectionReveal.staggerCap, 8);
-  assert.equal(SITE_CONFIG.sectionReveal.intersectionThreshold, 0.25);
-  assert.equal(SITE_CONFIG.sectionReveal.settleDurationMs, 120);
-  assert.equal(SITE_CONFIG.sectionReveal.failsafeTimeoutMs, 3000);
+  assert.equal(SITE_CONFIG.sectionReveal.translateYDistancePx, 8);
+  assert.equal(SITE_CONFIG.sectionReveal.staggerMs, 20);
+  assert.equal(SITE_CONFIG.sectionReveal.staggerCap, 5);
+  assert.equal(SITE_CONFIG.sectionReveal.intersectionThreshold, 0.05);
+  assert.equal(SITE_CONFIG.sectionReveal.rootMargin, '0px 0px 12% 0px');
+  assert.equal(SITE_CONFIG.sectionReveal.failsafeTimeoutMs, 200);
 
-  // 2. Stagger delay capped at 8 items (indices 0..7 -> max delay 280ms; 280 + 500 = 780ms < 900ms)
+  // 2. Stagger delay capped at 5 items (indices 0..4 -> max delay 80ms; 80 + 300 = 380ms <= 400ms)
   assert.equal(computeRevealStaggerDelayMs(0), 0);
-  assert.equal(computeRevealStaggerDelayMs(1), 40);
-  assert.equal(computeRevealStaggerDelayMs(7), 280);
-  assert.equal(computeRevealStaggerDelayMs(8), 280);
-  assert.equal(computeRevealStaggerDelayMs(25), 280);
+  assert.equal(computeRevealStaggerDelayMs(1), 20);
+  assert.equal(computeRevealStaggerDelayMs(4), 80);
+  assert.equal(computeRevealStaggerDelayMs(5), 80);
+  assert.equal(computeRevealStaggerDelayMs(25), 80);
   assert.ok(
-    computeRevealStaggerDelayMs(99) + SITE_CONFIG.sectionReveal.durationMs < 900,
-    'Entire section stagger + duration must finish in under 900ms',
+    computeRevealStaggerDelayMs(99) + SITE_CONFIG.sectionReveal.durationMs <= 400,
+    'Entire section stagger + duration must finish in about 400ms',
   );
 
   // 3. Initial hash case-insensitive resolution (e.g. #Connect -> 'connect')
@@ -677,18 +677,20 @@ test('Section-arrival reveal: config timings, 8-item stagger cap (<900ms), trans
   assert.equal(resolveInitialHashSectionId('#home'), null);
   assert.equal(resolveInitialHashSectionId(''), null);
 
-  // 4. Arrival trigger: 25% threshold, settled velocity, once-only, and nav-glide transit suppression
+  // 4. Two-mode reveal trigger:
+  //    - Normal scrolling: triggers immediately at >= 5% without waiting for velocity to settle
+  //    - Programmatic jump: suppresses sections passed over while flag is set
+  //    - Once-only: already revealed never re-animates
   assert.equal(
     shouldTriggerSectionArrival({
       sectionId: 'background',
       alreadyRevealed: false,
       isIntersecting: true,
-      intersectionRatio: 0.2,
-      inTransitTargetId: null,
-      isVelocitySettled: true,
+      intersectionRatio: 0.02,
+      isProgrammaticScroll: false,
     }),
     false,
-    'Below 25% visibility must not trigger arrival',
+    'Below 5% visibility must not trigger arrival',
   );
 
   assert.equal(
@@ -696,38 +698,37 @@ test('Section-arrival reveal: config timings, 8-item stagger cap (<900ms), trans
       sectionId: 'background',
       alreadyRevealed: false,
       isIntersecting: true,
-      intersectionRatio: 0.4,
-      inTransitTargetId: 'connect',
-      isVelocitySettled: true,
-    }),
-    false,
-    'Section passed in transit to #connect must not animate while passing',
-  );
-
-  assert.equal(
-    shouldTriggerSectionArrival({
-      sectionId: 'background',
-      alreadyRevealed: false,
-      isIntersecting: true,
-      intersectionRatio: 0.3,
-      inTransitTargetId: null,
-      isVelocitySettled: false,
-    }),
-    false,
-    'Unsettled scroll velocity must wait until settled',
-  );
-
-  assert.equal(
-    shouldTriggerSectionArrival({
-      sectionId: 'background',
-      alreadyRevealed: false,
-      isIntersecting: true,
-      intersectionRatio: 0.25,
-      inTransitTargetId: null,
-      isVelocitySettled: true,
+      intersectionRatio: 0.05,
+      isProgrammaticScroll: false,
     }),
     true,
-    'Settled velocity at >= 25% visibility triggers arrival',
+    'Normal scroll at >= 5% visibility triggers immediately without velocity check',
+  );
+
+  assert.equal(
+    shouldTriggerSectionArrival({
+      sectionId: 'background',
+      alreadyRevealed: false,
+      isIntersecting: true,
+      intersectionRatio: 0.5,
+      isProgrammaticScroll: true,
+      inTransitTargetId: 'connect',
+    }),
+    false,
+    'Section passed in transit during a programmatic jump must not animate while passing',
+  );
+
+  assert.equal(
+    shouldTriggerSectionArrival({
+      sectionId: 'skills',
+      alreadyRevealed: false,
+      isIntersecting: true,
+      intersectionRatio: 0.6,
+      isProgrammaticScroll: true,
+      inTransitTargetId: null,
+    }),
+    false,
+    'Programmatic jump flag suppresses passed-over sections even without a targetSectionId',
   );
 
   assert.equal(
@@ -736,8 +737,7 @@ test('Section-arrival reveal: config timings, 8-item stagger cap (<900ms), trans
       alreadyRevealed: true,
       isIntersecting: true,
       intersectionRatio: 0.8,
-      inTransitTargetId: null,
-      isVelocitySettled: true,
+      isProgrammaticScroll: false,
     }),
     false,
     'Already revealed section never re-animates',
@@ -786,6 +786,16 @@ test('Section-arrival reveal: config timings, 8-item stagger cap (<900ms), trans
       prefersReducedMotion: false,
       qualityTier: 'medium',
       saveData: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDisableSectionReveal({
+      plainView: false,
+      prefersReducedMotion: false,
+      qualityTier: 'high',
+      saveData: false,
+      isPrint: true,
     }),
     true,
   );

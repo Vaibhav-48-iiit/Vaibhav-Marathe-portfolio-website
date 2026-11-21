@@ -774,7 +774,7 @@ export function shouldDisableSectionReveal(params: {
 /**
  * Computes the stagger delay in milliseconds for an ordered element inside a section,
  * capped at `staggerCap` items (indices 0..staggerCap-1) so the entire section
- * completes in under ~900 ms.
+ * completes in about 400 ms.
  */
 export function computeRevealStaggerDelayMs(
   itemIndex: number,
@@ -803,35 +803,41 @@ export function resolveInitialHashSectionId(hash: string): SectionId | null {
 }
 
 /**
- * Pure decision function for whether a section should trigger its arrival animation.
+ * Pure decision function for whether a section should trigger its reveal animation.
  * - Plays at most ONCE (`alreadyRevealed` returns false).
- * - Requires at least `intersectionThreshold` (25%) of the section to be in view.
- * - Suppresses sections passed in transit during a programmatic nav `scrollTo`.
- * - Requires scroll velocity to have settled below `velocityThreshold` for `settleDurationMs`
- *   (or slow scrolling where velocity has remained below threshold).
+ * - Normal scrolling (`isProgrammaticScroll === false`): reveals immediately as soon as
+ *   at least `intersectionThreshold` (5%) intersects, with no velocity check or settle wait.
+ * - Programmatic jumps (`isProgrammaticScroll === true`): suppresses sections passed over
+ *   in transit; the landing section is revealed immediately when the jump finishes.
  */
 export function shouldTriggerSectionArrival(params: {
   sectionId: SectionId;
   alreadyRevealed: boolean;
   isIntersecting: boolean;
   intersectionRatio: number;
-  inTransitTargetId: SectionId | null;
-  isVelocitySettled: boolean;
+  isProgrammaticScroll: boolean;
+  inTransitTargetId?: SectionId | null;
   intersectionThreshold?: number;
 }): boolean {
   if (params.alreadyRevealed) return false;
   if (!params.isIntersecting) return false;
-  const threshold =
-    params.intersectionThreshold ?? SITE_CONFIG.sectionReveal.intersectionThreshold;
-  if (params.intersectionRatio < threshold) return false;
+  if (params.isProgrammaticScroll) return false;
   if (
+    params.inTransitTargetId !== undefined &&
     params.inTransitTargetId !== null &&
     params.inTransitTargetId !== params.sectionId
   ) {
     return false;
   }
-  return params.isVelocitySettled;
+  const threshold =
+    params.intersectionThreshold ?? SITE_CONFIG.sectionReveal.intersectionThreshold;
+  return params.intersectionRatio >= threshold;
 }
+
+// Preserved arrival thresholds for the repeatable particle morph state machine (unchanged)
+export const MORPH_ARRIVAL_INTERSECTION_THRESHOLD = 0.25;
+export const MORPH_VELOCITY_THRESHOLD = 1.5;
+export const MORPH_SETTLE_DURATION_MS = 120;
 
 /**
  * Determines whether particle morph shapes must be disabled:
@@ -913,7 +919,7 @@ export function resolveDominantArrivedSection(params: {
   intersectionThreshold?: number;
 }): SectionId | null {
   const threshold =
-    params.intersectionThreshold ?? SITE_CONFIG.sectionReveal.intersectionThreshold;
+    params.intersectionThreshold ?? MORPH_ARRIVAL_INTERSECTION_THRESHOLD;
 
   // 1. While a programmatic nav jump (lenis.scrollTo) is in transit, suppress intermediate
   //    sections passed along the way so jumping Home -> Connect never flashes TOPOLOGY.

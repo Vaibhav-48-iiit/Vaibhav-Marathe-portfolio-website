@@ -388,23 +388,21 @@ export const SITE_CONFIG = {
   // Section-arrival reveal animation configuration (home page sections after Hero only)
   sectionReveal: {
     // Fade and translateY duration in milliseconds
-    durationMs: 500,
+    durationMs: 300,
     // CSS timing function for section-arrival transitions
     easing: 'ease-out',
-    // Vertical upward translation distance in pixels (12px -> 0px)
-    translateYDistancePx: 12,
+    // Vertical upward translation distance in pixels (8px -> 0px)
+    translateYDistancePx: 8,
     // Stagger step between ordered elements inside a section in milliseconds
-    staggerMs: 40,
-    // Maximum number of staggered items per section so total reveal finishes under ~900ms
-    staggerCap: 8,
-    // Minimum fraction of a section that must be in view to count as arrived (25%)
-    intersectionThreshold: 0.25,
-    // Maximum |lenis.velocity| treated as settled / slow scrolling
-    velocityThreshold: 1.5,
-    // Time in milliseconds velocity must remain below velocityThreshold to count as settled
-    settleDurationMs: 120,
-    // Failsafe timeout in milliseconds after reaching 25% visibility to force reveal
-    failsafeTimeoutMs: 3000,
+    staggerMs: 20,
+    // Maximum number of staggered items per section (0..80ms delay; ~380ms total)
+    staggerCap: 5,
+    // Minimum fraction of a section that must be in view to trigger normal-scroll reveal (5%)
+    intersectionThreshold: 0.05,
+    // Root margin so normal-scroll fade begins just as the section comes into view
+    rootMargin: '0px 0px 12% 0px',
+    // Failsafe delay in milliseconds if a section is >= 5% in view and has not animated
+    failsafeTimeoutMs: 200,
   },
 
   // Particle morph system configuration (HERO -> AMBIENT -> TOPOLOGY / DOLLAR -> HASH)

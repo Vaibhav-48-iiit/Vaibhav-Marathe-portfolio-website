@@ -28,6 +28,8 @@ import {
   isIntroFinishedInSession,
   isSaveDataEnabled,
   markIntroFinishedInSession,
+  MORPH_SETTLE_DURATION_MS,
+  MORPH_VELOCITY_THRESHOLD,
   resolveInitialHashSectionId,
   resolveMorphParticleCount,
   resolveQualityTierProfile,
@@ -501,14 +503,25 @@ function AppShell() {
 
   const lenisRef = useRef<Lenis | null>(null);
   const transitTimerRef = useRef<number>(0);
-  const scrollArrivalRef = useRef<ScrollArrivalController>({
-    velocity: 0,
-    settledSinceMs: 0,
-    inTransitTargetId: null,
-    settleListeners: new Set(),
-    arrivedSectionId: 'home',
-    inViewMap: createInitialSectionVisibilityMap(),
-  });
+  const immediateJumpRafRef = useRef<number>(0);
+  const scrollArrivalRef = useRef<ScrollArrivalController>((() => {
+    const initialHashSec =
+      typeof window !== 'undefined'
+        ? resolveInitialHashSectionId(window.location.hash)
+        : null;
+    return {
+      velocity: 0,
+      settledSinceMs: 0,
+      isProgrammaticScroll: Boolean(initialHashSec),
+      awaitingUserScroll: true,
+      lastProgrammaticEndScrollY: 0,
+      inTransitTargetId: initialHashSec,
+      settleListeners: new Set(),
+      normalScrollListeners: new Set(),
+      arrivedSectionId: initialHashSec ?? 'home',
+      inViewMap: createInitialSectionVisibilityMap(),
+    };
+  })());
 
   const scrollMetricsRef = useRef<ScrollMetrics>(
     computeScrollMetrics({
@@ -584,9 +597,18 @@ function AppShell() {
       lenisRef.current = null;
 
       const onNativeScroll = () => {
-        applyScrollPosition(
-          document.documentElement.scrollTop || document.body.scrollTop || 0,
-        );
+        const scrollPx =
+          document.documentElement.scrollTop || document.body.scrollTop || 0;
+        const ctrl = scrollArrivalRef.current;
+        if (
+          !ctrl.isProgrammaticScroll &&
+          ctrl.awaitingUserScroll &&
+          Math.abs(scrollPx - ctrl.lastProgrammaticEndScrollY) > 2
+        ) {
+          ctrl.awaitingUserScroll = false;
+          ctrl.normalScrollListeners.forEach((cb) => cb());
+        }
+        applyScrollPosition(scrollPx);
       };
       onNativeScroll();
       window.addEventListener('scroll', onNativeScroll, { passive: true });
@@ -612,13 +634,22 @@ function AppShell() {
     lenis.on('scroll', (instance: Lenis) => {
       const absVel = Math.abs(instance.velocity);
       const ctrl = scrollArrivalRef.current;
-      const velThreshold = SITE_CONFIG.sectionReveal.velocityThreshold;
-      const settleMs = SITE_CONFIG.sectionReveal.settleDurationMs;
+      const velThreshold = MORPH_VELOCITY_THRESHOLD;
+      const settleMs = MORPH_SETTLE_DURATION_MS;
       const now =
         typeof performance !== 'undefined' ? performance.now() : Date.now();
       const wasAboveThreshold = ctrl.velocity > velThreshold;
 
       ctrl.velocity = absVel;
+
+      if (
+        !ctrl.isProgrammaticScroll &&
+        ctrl.awaitingUserScroll &&
+        Math.abs(instance.scroll - ctrl.lastProgrammaticEndScrollY) > 16
+      ) {
+        ctrl.awaitingUserScroll = false;
+        ctrl.normalScrollListeners.forEach((cb) => cb());
+      }
 
       if (absVel > velThreshold) {
         ctrl.settledSinceMs = now;
@@ -643,6 +674,47 @@ function AppShell() {
 
       applyScrollPosition(instance.scroll);
     });
+
+    // Normal user scroll input (wheel, touchpad, touch drag, scroll keys) immediately enters
+    // normal scroll mode and cancels any in-flight programmatic jump flag.
+    const activateNormalScrollMode = () => {
+      const ctrl = scrollArrivalRef.current;
+      if (ctrl.isProgrammaticScroll) {
+        window.clearTimeout(transitTimerRef.current);
+        window.cancelAnimationFrame(immediateJumpRafRef.current);
+        ctrl.isProgrammaticScroll = false;
+        ctrl.inTransitTargetId = null;
+        ctrl.awaitingUserScroll = false;
+        ctrl.normalScrollListeners.forEach((cb) => cb());
+      } else if (ctrl.awaitingUserScroll) {
+        ctrl.awaitingUserScroll = false;
+        ctrl.normalScrollListeners.forEach((cb) => cb());
+      }
+    };
+
+    const onUserKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.key === 'ArrowDown' ||
+        e.key === 'ArrowUp' ||
+        e.key === 'PageDown' ||
+        e.key === 'PageUp' ||
+        e.key === ' ' ||
+        e.key === 'Home' ||
+        e.key === 'End'
+      ) {
+        activateNormalScrollMode();
+      }
+    };
+
+    const onHashChange = () => {
+      const hashSecId = resolveInitialHashSectionId(window.location.hash);
+      if (hashSecId) {
+        const ctrl = scrollArrivalRef.current;
+        ctrl.isProgrammaticScroll = true;
+        ctrl.awaitingUserScroll = true;
+        ctrl.inTransitTargetId = hashSecId;
+      }
+    };
 
     // Sync initial position
     applyScrollPosition(lenis.scroll);
@@ -678,14 +750,23 @@ function AppShell() {
 
     document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('resize', onResize);
+    window.addEventListener('wheel', activateNormalScrollMode, { passive: true });
+    window.addEventListener('touchmove', activateNormalScrollMode, { passive: true });
+    window.addEventListener('keydown', onUserKeyDown, { passive: true });
+    window.addEventListener('hashchange', onHashChange);
     rafId = window.requestAnimationFrame(raf);
 
     return () => {
       window.cancelAnimationFrame(rafId);
+      window.cancelAnimationFrame(immediateJumpRafRef.current);
       window.clearTimeout(resizeTimerId);
       window.clearTimeout(settleTimerId);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('resize', onResize);
+      window.removeEventListener('wheel', activateNormalScrollMode);
+      window.removeEventListener('touchmove', activateNormalScrollMode);
+      window.removeEventListener('keydown', onUserKeyDown);
+      window.removeEventListener('hashchange', onHashChange);
       lenis.destroy();
       if (lenisRef.current === lenis) {
         lenisRef.current = null;
@@ -714,15 +795,18 @@ function AppShell() {
       const targetSectionId = options?.targetSectionId;
 
       window.clearTimeout(transitTimerRef.current);
+      window.cancelAnimationFrame(immediateJumpRafRef.current);
       const ctrl = scrollArrivalRef.current;
 
       const lenis = lenisRef.current;
       if (lenis) {
-        if (!immediate && targetSectionId) {
-          ctrl.inTransitTargetId = targetSectionId;
+        if (!immediate) {
+          ctrl.isProgrammaticScroll = true;
+          ctrl.awaitingUserScroll = true;
+          ctrl.inTransitTargetId = targetSectionId ?? null;
           // Leaving the current section during a nav jump returns particles to AMBIENT while in transit
           // (so jumping Home -> Connect never flashes TOPOLOGY on the way)
-          if (ctrl.arrivedSectionId !== targetSectionId) {
+          if (targetSectionId && ctrl.arrivedSectionId !== targetSectionId) {
             ctrl.arrivedSectionId = null;
           }
           let completed = false;
@@ -730,13 +814,18 @@ function AppShell() {
             if (completed) return;
             completed = true;
             window.clearTimeout(transitTimerRef.current);
-            if (ctrl.inTransitTargetId === targetSectionId) {
+            ctrl.isProgrammaticScroll = false;
+            if (ctrl.inTransitTargetId === (targetSectionId ?? null)) {
               ctrl.inTransitTargetId = null;
             }
+            ctrl.lastProgrammaticEndScrollY = lenis.scroll;
+            ctrl.awaitingUserScroll = true;
             ctrl.velocity = 0;
             ctrl.settledSinceMs = 0;
-            ctrl.arrivedSectionId = targetSectionId;
-            ctrl.onLandSection?.(targetSectionId);
+            if (targetSectionId) {
+              ctrl.arrivedSectionId = targetSectionId;
+              ctrl.onLandSection?.(targetSectionId);
+            }
             ctrl.settleListeners.forEach((cb) => cb());
           };
 
@@ -746,28 +835,55 @@ function AppShell() {
             onComplete: finishNavScroll,
           });
 
+          const fallbackDelayMs =
+            Math.ceil(SITE_CONFIG.lenis.duration * 1000) + 250;
+          let fallbackChecks = 0;
+          const checkFallbackComplete = () => {
+            if (completed) return;
+            const remainingPx = Math.abs(lenis.targetScroll - lenis.scroll);
+            if (lenis.isScrolling && remainingPx > 2 && fallbackChecks < 15) {
+              fallbackChecks += 1;
+              transitTimerRef.current = window.setTimeout(
+                checkFallbackComplete,
+                100,
+              );
+              return;
+            }
+            finishNavScroll();
+          };
           transitTimerRef.current = window.setTimeout(
-            finishNavScroll,
-            Math.ceil(SITE_CONFIG.lenis.duration * 1000) + 120,
+            checkFallbackComplete,
+            fallbackDelayMs,
           );
           return;
         }
 
-        ctrl.inTransitTargetId = null;
+        ctrl.isProgrammaticScroll = true;
+        ctrl.awaitingUserScroll = true;
+        ctrl.inTransitTargetId = targetSectionId ?? null;
         ctrl.velocity = 0;
         ctrl.settledSinceMs = 0;
-        lenis.scrollTo(target, { offset, immediate });
+        lenis.scrollTo(target, { offset, immediate: true });
+        ctrl.lastProgrammaticEndScrollY = lenis.scroll;
         if (targetSectionId) {
           ctrl.arrivedSectionId = targetSectionId;
           ctrl.onLandSection?.(targetSectionId);
         }
-        if (immediate && typeof target === 'number') {
+        if (typeof target === 'number') {
           applyScrollPosition(target);
         }
+        immediateJumpRafRef.current = window.requestAnimationFrame(() => {
+          ctrl.isProgrammaticScroll = false;
+          ctrl.inTransitTargetId = null;
+          ctrl.lastProgrammaticEndScrollY = lenis.scroll;
+          ctrl.settleListeners.forEach((cb) => cb());
+        });
         return;
       }
 
       // Native fallback when Lenis is not initialised (Plain view or reducedMotion)
+      ctrl.isProgrammaticScroll = false;
+      ctrl.awaitingUserScroll = true;
       ctrl.inTransitTargetId = null;
       ctrl.velocity = 0;
       ctrl.settledSinceMs = 0;
@@ -796,6 +912,7 @@ function AppShell() {
       }
       document.documentElement.scrollTop = targetTop;
       document.body.scrollTop = targetTop;
+      ctrl.lastProgrammaticEndScrollY = targetTop;
       applyScrollPosition(targetTop);
     },
     [applyScrollPosition],
@@ -811,6 +928,12 @@ function AppShell() {
       const targetSelector = hashSecId ? `#${hashSecId}` : location.hash;
       const isInitialLoad = !initialHashHandledRef.current;
       initialHashHandledRef.current = true;
+
+      // Mark programmatic scroll flag immediately so browser hash jumping never reveals passed sections
+      const ctrl = scrollArrivalRef.current;
+      ctrl.isProgrammaticScroll = true;
+      ctrl.awaitingUserScroll = true;
+      ctrl.inTransitTargetId = hashSecId ?? null;
 
       if (isInitialLoad) {
         // If the page loads with a hash (e.g. #Connect), jump and reveal immediately without a wait
@@ -933,7 +1056,10 @@ function AppShell() {
           const mainEl = document.getElementById('main-content');
           if (mainEl) {
             mainEl.focus({ preventScroll: true });
-            scrollToTarget(mainEl, { offset: SITE_CONFIG.lenis.headerOffsetPx });
+            scrollToTarget(mainEl, {
+              offset: SITE_CONFIG.lenis.headerOffsetPx,
+              targetSectionId: 'home',
+            });
           }
         }}
         className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded focus:border focus:border-[var(--accent)] focus:bg-[var(--bg)] focus:px-3 focus:py-1.5 focus:font-data-mono focus:text-xs focus:text-[var(--accent)]"
