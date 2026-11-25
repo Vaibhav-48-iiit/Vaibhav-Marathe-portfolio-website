@@ -34,8 +34,10 @@ import {
   resolveMorphParticleCount,
   resolveQualityTierProfile,
   resolveStartingQualityTier,
+  resolveStaticShieldSymbol,
   savePlainViewPreference,
   shouldDisableMorph,
+  shouldDisableSymbolCycle,
   shouldSkipIntroOnLoad,
   type ScrollMetrics,
 } from './particleMath';
@@ -335,6 +337,20 @@ function AppShell() {
       saveData: isSaveDataEnabled(),
       viewportWidth: w,
     });
+    const symbolCycleDisabled = shouldDisableSymbolCycle({
+      shieldSymbolConfig: SITE_CONFIG.shield.SHIELD_SYMBOL,
+      plainView,
+      prefersReducedMotion: reducedMotion,
+      qualityTier: prof.tier,
+      saveData: isSaveDataEnabled(),
+    });
+    const initialSymbol = resolveStaticShieldSymbol({
+      shieldSymbolConfig: SITE_CONFIG.shield.SHIELD_SYMBOL,
+      plainView,
+      prefersReducedMotion: reducedMotion,
+      qualityTier: prof.tier,
+      saveData: isSaveDataEnabled(),
+    });
     return {
       tier: prof.tier,
       fps: 60,
@@ -344,6 +360,11 @@ function AppShell() {
       morphState: 'HERO',
       morphParticleCount: resolveMorphParticleCount(prof.tier, morphDisabled),
       clearAlpha: 0,
+      shieldSymbol: initialSymbol,
+      shieldSymbolNextSec: symbolCycleDisabled
+        ? null
+        : Number((SITE_CONFIG.shield.SYMBOL_HOLD_MS / 1000).toFixed(1)),
+      shieldSymbolPhase: symbolCycleDisabled ? 'STATIC' : 'HOLD',
     };
   })());
 
@@ -355,6 +376,8 @@ function AppShell() {
   const debugFpsSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugParticlesSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugParticlesSubSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugSymbolSpanRef = useRef<HTMLSpanElement | null>(null);
+  const debugSymbolNextSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugMorphStateSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugMorphCountSpanRef = useRef<HTMLSpanElement | null>(null);
   const debugDprSpanRef = useRef<HTMLSpanElement | null>(null);
@@ -389,10 +412,17 @@ function AppShell() {
     const morphCountVal = isPlain ? 0 : stats.morphParticleCount;
     const currentTheme = getTheme();
 
+    const symbolNameLabel = isPlain ? 'term' : stats.shieldSymbol;
+    const symbolNextLabel =
+      isPlain || stats.shieldSymbolNextSec === null
+        ? 'static'
+        : `${stats.shieldSymbolNextSec.toFixed(1)}s`;
+
     if (appRootRef.current) {
       appRootRef.current.setAttribute('data-quality-tier', tierLabel);
       appRootRef.current.setAttribute('data-morph-state', morphStateLabel);
       appRootRef.current.setAttribute('data-theme', currentTheme);
+      appRootRef.current.setAttribute('data-shield-symbol', symbolNameLabel);
     }
     if (debugTierSpanRef.current) {
       debugTierSpanRef.current.textContent = tierLabel;
@@ -418,6 +448,12 @@ function AppShell() {
       debugParticlesSubSpanRef.current.textContent = isPlain
         ? ''
         : ` (${stats.particleCount}+${stats.ambientParticleCount})`;
+    }
+    if (debugSymbolSpanRef.current) {
+      debugSymbolSpanRef.current.textContent = symbolNameLabel;
+    }
+    if (debugSymbolNextSpanRef.current) {
+      debugSymbolNextSpanRef.current.textContent = symbolNextLabel;
     }
     if (debugMorphStateSpanRef.current) {
       debugMorphStateSpanRef.current.textContent = morphStateLabel;
@@ -1137,6 +1173,28 @@ function AppShell() {
               {!plainView
                 ? ` (${initialStats.particleCount}+${initialStats.ambientParticleCount})`
                 : ''}
+            </span>
+          </div>
+          <div>
+            symbol:{' '}
+            <span
+              ref={debugSymbolSpanRef}
+              data-testid="debug-shield-symbol"
+              className="text-[var(--accent)]"
+            >
+              {plainView ? 'term' : initialStats.shieldSymbol}
+            </span>
+          </div>
+          <div>
+            next change:{' '}
+            <span
+              ref={debugSymbolNextSpanRef}
+              data-testid="debug-shield-symbol-next"
+              className="text-[var(--text-primary)]"
+            >
+              {plainView || initialStats.shieldSymbolNextSec === null
+                ? 'static'
+                : `${initialStats.shieldSymbolNextSec.toFixed(1)}s`}
             </span>
           </div>
           <div>

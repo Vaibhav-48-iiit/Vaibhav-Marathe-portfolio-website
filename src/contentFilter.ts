@@ -89,6 +89,7 @@ export interface WriteupEntry {
   date?: string;
   tags: string[];
   roomUrl?: string;
+  githubUrl?: string;
   summary: string;
   sections: Record<WriteupSectionKey, WriteupSectionData>;
 }
@@ -326,7 +327,7 @@ export function getActiveWriteupEntries(searchQuery = ''): WriteupEntry[] {
   }
 
   return baseEntries.map((entry) => {
-    if (entry.slug !== 'mr-robot') return entry;
+    if (entry.slug !== 'mr-robot' || entry.published) return entry;
     return {
       ...entry,
       published: true,

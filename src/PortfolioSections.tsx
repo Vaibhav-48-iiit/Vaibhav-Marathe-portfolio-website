@@ -1411,12 +1411,24 @@ export function PortfolioSections({
                             </div>
                           )}
 
-                          <Link
-                            to={entryHref}
-                            className="inline-flex min-h-[44px] items-center py-1 text-[var(--accent)] underline decoration-[var(--accent)]/40 underline-offset-4 transition-colors hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
-                          >
-                            Read write-up →
-                          </Link>
+                          <div className="flex flex-wrap items-center gap-4">
+                            <Link
+                              to={entryHref}
+                              className="inline-flex min-h-[44px] items-center py-1 text-[var(--accent)] underline decoration-[var(--accent)]/40 underline-offset-4 transition-colors hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+                            >
+                              Read write-up →
+                            </Link>
+                            {isRenderableText(entry.githubUrl) && (
+                              <a
+                                href={entry.githubUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex min-h-[44px] items-center py-1 text-[var(--text-primary)] underline decoration-[var(--border-subtle)] underline-offset-4 transition-colors hover:text-[var(--accent)] hover:decoration-[var(--accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+                              >
+                                GitHub write-up ↗
+                              </a>
+                            )}
+                          </div>
                         </div>
                       </li>
                     );

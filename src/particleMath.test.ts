@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   generateDeltaNetwork,
+  generateShieldNetwork,
   generateAmbientDepthField,
   updateParticlesForScroll,
+  computeHeroShieldPlacement,
   computeIdleMotionScale,
   computeScrollMetrics,
   buildPacketEdgeLoops,
@@ -38,6 +40,13 @@ import {
   stepCriticallyDampedSpringBuffer,
   computeShapeEffectiveMaxOpacity,
   selectNonOverlappingLitLeafNodes,
+  easeInOutCubic,
+  shouldDisableSymbolCycle,
+  resolveStaticShieldSymbol,
+  createSymbolCycleState,
+  stepSymbolCycleState,
+  computeMaxSymbolSegmentVertices,
+  writeSymbolSegmentsBuffer,
 } from './particleMath';
 import { buildWriteupHref, resolveRoute } from './router';
 import {
@@ -54,7 +63,20 @@ import {
   getInitialSoundMuted,
   saveSoundMutedPreference,
 } from './soundEngine';
-import { SITE_CONFIG } from './config';
+import {
+  SHIELD_HEIGHT_VH,
+  SHIELD_SYMBOL,
+  SYMBOL_ORDER,
+  SYMBOL_HOLD_MS,
+  SYMBOL_MORPH_MS,
+  termNodes,
+  termEdges,
+  hatNodes,
+  hatEdges,
+  codeNodes,
+  codeEdges,
+  SITE_CONFIG,
+} from './config';
 import { PORTFOLIO_CONTENT } from './content.js';
 
 test('Intro stability: ?intro=0 skips immediately, session completion is idempotent, mount counter increments once, and failsafe timings are configured', () => {
@@ -150,27 +172,27 @@ test('Phase 6: quality tiers, pixel-ratio caps, saveData Plain view default, TOD
   );
   assert.equal(isRenderableText('TODO: placeholder'), false);
 
-  // 2. Links to a write-up page (e.g. Mr Robot in Broken lane) render ONLY when published:true
+  // 2. Links to a write-up page render when published:true and are stripped when published:false
   const defaultMrRobotLab = defaultContent.projectsAndCtfs.broken.find(
     (item) => item.id === 'broken-mr-robot',
   );
   assert.ok(defaultMrRobotLab, 'Expected Mr Robot CTF in broken lane');
   assert.equal(
     defaultMrRobotLab.writeupUrl,
-    '',
-    'Unpublished write-up link must be stripped when published:false',
-  );
-  assert.equal(isWriteupUrlPublished('/writeups/mr-robot'), false);
-
-  const publishedContent = getConfirmedPortfolioContent('?demo=published');
-  const publishedMrRobotLab = publishedContent.projectsAndCtfs.broken.find(
-    (item) => item.id === 'broken-mr-robot',
-  );
-  assert.ok(publishedMrRobotLab);
-  assert.equal(
-    publishedMrRobotLab.writeupUrl,
     '/writeups/mr-robot',
-    'Published write-up link must render when published:true',
+    'Published Mr Robot write-up link must render in Broken lane',
+  );
+  assert.equal(isWriteupUrlPublished('/writeups/mr-robot'), true);
+  assert.equal(
+    isWriteupUrlPublished('/writeups/unpublished-draft', [
+      {
+        ...getWriteupBySlug('mr-robot')!,
+        slug: 'unpublished-draft',
+        published: false,
+      },
+    ]),
+    false,
+    'Unpublished write-up link must return false',
   );
 
   // 3. Starting quality tier selection (phones start at medium or low; desktop starts at high/medium/low)
@@ -284,45 +306,54 @@ test('Phase 5: Lenis config, Connect section channels, hero labels, and sound st
   assert.equal(content.connect.channels[0].copyValue, 'vaibhavashokm123@gmail.com');
 });
 
-test('writeup filtering: published:false shows empty list; published:true with partial sections renders only filled sections and enforces screenshot alt text', () => {
-  // 1. Default seed state: mr-robot has published: false and all 9 sections empty
+test('writeup filtering: Mr Robot CTF is published with GitHub URL and all sections; unpublished entries, partial sections, and screenshot alt text filter correctly', () => {
+  // 1. Default published state: mr-robot is published with GitHub URL and all 9 structured sections populated
   const defaultPublished = getPublishedWriteups();
-  assert.equal(defaultPublished.length, 0, 'Expected 0 published write-ups by default');
+  assert.equal(defaultPublished.length, 1, 'Expected Mr Robot CTF to be published');
 
-  const seedMrRobot = getWriteupBySlug('mr-robot');
-  assert.ok(seedMrRobot, 'Expected mr-robot seed entry to exist');
-  assert.equal(seedMrRobot.published, false);
-  assert.equal(seedMrRobot.type, 'guided-lab');
+  const mrRobot = getWriteupBySlug('mr-robot');
+  assert.ok(mrRobot, 'Expected mr-robot entry to exist');
+  assert.equal(mrRobot.published, true);
+  assert.equal(mrRobot.type, 'guided-lab');
   assert.equal(
-    getRenderableWriteupSections(seedMrRobot).length,
-    0,
-    'Seed mr-robot with empty TODO sections must render 0 body sections',
+    mrRobot.githubUrl,
+    'https://github.com/Vaibhav-48-iiit/ctf-writeups/tree/main/mr-robot-ctf',
   );
-  assert.equal(estimateWriteupReadingTime(seedMrRobot), null);
-
-  // 2. Published preview state (?demo=published): mr-robot has published: true and 3 of 9 sections filled
-  const demoEntries = getActiveWriteupEntries('?demo=published');
-  const demoPublished = getPublishedWriteups(demoEntries);
-  assert.equal(demoPublished.length, 1);
-  assert.equal(demoPublished[0].slug, 'mr-robot');
-
-  const demoSections = getRenderableWriteupSections(demoPublished[0]);
-  assert.deepEqual(
-    demoSections.map((s) => s.key),
-    ['goal', 'reconnaissance', 'privilegeEscalation'],
-    'Only non-empty sections must render in exact order',
-  );
+  const mrRobotSections = getRenderableWriteupSections(mrRobot);
+  assert.equal(mrRobotSections.length, 9, 'Expected all 9 structured sections to be populated');
   assert.ok(
-    estimateWriteupReadingTime(demoPublished[0])?.endsWith('min read'),
-    'Expected estimated reading time when sections are populated',
+    estimateWriteupReadingTime(mrRobot)?.endsWith('min read'),
+    'Expected estimated reading time for published Mr Robot CTF write-up',
   );
 
-  // 3. Screenshot without alt text must be rejected
+  // 2. Unpublished draft entry with empty sections is excluded from published list and renders 0 sections
+  const emptySections = {
+    goal: { paragraphs: [], steps: [], codeBlocks: [], screenshots: [] },
+    setup: { paragraphs: [], steps: [], codeBlocks: [], screenshots: [] },
+    reconnaissance: { paragraphs: [], steps: [], codeBlocks: [], screenshots: [] },
+    enumeration: { paragraphs: [], steps: [], codeBlocks: [], screenshots: [] },
+    foothold: { paragraphs: [], steps: [], codeBlocks: [], screenshots: [] },
+    privilegeEscalation: { paragraphs: [], steps: [], codeBlocks: [], screenshots: [] },
+    whatIGotWrong: { paragraphs: [], steps: [], codeBlocks: [], screenshots: [] },
+    defendersView: { paragraphs: [], steps: [], codeBlocks: [], screenshots: [] },
+    takeaways: { paragraphs: [], steps: [], codeBlocks: [], screenshots: [] },
+  };
+  const draftEntry = {
+    ...mrRobot,
+    slug: 'draft-lab',
+    published: false,
+    sections: emptySections,
+  };
+  assert.equal(getPublishedWriteups([draftEntry]).length, 0);
+  assert.equal(getRenderableWriteupSections(draftEntry).length, 0);
+  assert.equal(estimateWriteupReadingTime(draftEntry), null);
+
+  // 3. Partial sections render only filled sections in exact order, and screenshot without alt text is rejected
   const customEntry = {
-    ...seedMrRobot,
+    ...draftEntry,
     published: true,
     sections: {
-      ...seedMrRobot.sections,
+      ...emptySections,
       enumeration: {
         paragraphs: [],
         steps: [],
@@ -346,6 +377,9 @@ test('writeup filtering: published:false shows empty list; published:true with p
     customRendered[0].screenshots[0].alt,
     'Gobuster directory scan terminal output',
   );
+
+  // Ensure getActiveWriteupEntries preserves the published mr-robot entry
+  assert.equal(getActiveWriteupEntries('?demo=published')[0].githubUrl, mrRobot.githubUrl);
 });
 
 test('contentFilter excludes all confirmed:false items and empty/TODO strings', () => {
@@ -1161,6 +1195,513 @@ test('dark/light theme store: starts in dark in-memory, notifies subscribers, an
     `Light amber contrast ${computeContrastRatio(light.amber, light.background).toFixed(2)}:1 must be >= 4.5:1`,
   );
 });
+
+test('Hero shield structure: deterministic double outline, 3 z-layers, SHIELD_SYMBOL variants (term/hat/code), tier particle counts, and +/-15 deg 14s sway', () => {
+  // 1. Default SHIELD_SYMBOL config ('cycle') & exact 14 outer + 14 inner outline vertices + 14 radial links
+  assert.equal(SHIELD_SYMBOL, 'cycle');
+  assert.equal(SITE_CONFIG.shield.SHIELD_SYMBOL, 'cycle');
+  assert.deepEqual(Array.from(SYMBOL_ORDER), ['term', 'hat', 'code']);
+  assert.equal(SYMBOL_HOLD_MS, 5000);
+  assert.equal(SYMBOL_MORPH_MS, 1200);
+  assert.equal(SITE_CONFIG.shield.outerOutline.length, 14);
+  assert.equal(SITE_CONFIG.shield.innerOutline.length, 14);
+  assert.equal(SITE_CONFIG.shield.radialLinks.length, 14);
+  assert.deepEqual(Array.from(SITE_CONFIG.shield.zLayerFractions), [-0.15, 0, 0.15]);
+
+  // 2. Gentle yaw sway: +/-15 degrees (~0.2618 rad) over ~14 seconds with slight tilt
+  assert.equal(SITE_CONFIG.idle.rotationPeriodSec, 14.0);
+  const swayDeg = (SITE_CONFIG.idle.rotationAmplitudeY * 180) / Math.PI;
+  assert.ok(
+    swayDeg >= 14.5 && swayDeg <= 15.5,
+    `Expected yaw sway around +/-15 deg, got +/-${swayDeg.toFixed(2)} deg`,
+  );
+  assert.ok(SITE_CONFIG.idle.tiltAmplitudeX > 0 && SITE_CONFIG.idle.tiltAmplitudeX <= 0.08);
+  assert.ok(SITE_CONFIG.idle.tiltAmplitudeZ > 0 && SITE_CONFIG.idle.tiltAmplitudeZ <= 0.04);
+
+  // 3. Exact total particle count preserved across all 3 quality tiers (190 / 95 / 65)
+  for (const tierCount of [
+    SITE_CONFIG.qualityTiers.tiers.high.particleCount,
+    SITE_CONFIG.qualityTiers.tiers.medium.particleCount,
+    SITE_CONFIG.qualityTiers.tiers.low.particleCount,
+  ]) {
+    const net = generateShieldNetwork(tierCount, 'term', 42);
+    assert.equal(net.basePositions.length, tierCount * 3);
+    assert.equal(net.driftVectors.length, tierCount * 3);
+    assert.equal(net.phases.length, tierCount);
+    assert.equal(net.nodeIsSymbol.length, tierCount);
+
+    let symCount = 0;
+    let shieldCount = 0;
+    const distinctZ = new Set<string>();
+    for (let i = 0; i < tierCount; i++) {
+      if (net.nodeIsSymbol[i] === 1) symCount++;
+      else shieldCount++;
+      distinctZ.add(net.basePositions[i * 3 + 2].toFixed(3));
+    }
+    assert.ok(symCount > 0, `Tier count ${tierCount} must include symbol nodes`);
+    assert.ok(shieldCount > 0, `Tier count ${tierCount} must include shield nodes`);
+    assert.equal(
+      distinctZ.size,
+      3,
+      `Tier count ${tierCount} must populate all 3 z-layers (-0.15, 0, +0.15 H)`,
+    );
+  }
+
+  // 4. Verify 3 z-layer geometry height and depth offsets (-0.15H, 0, +0.15H)
+  const highTerm = generateShieldNetwork(190, 'term', 42);
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  for (let i = 0; i < highTerm.wireframeBasePositions.length; i += 3) {
+    const y = highTerm.wireframeBasePositions[i + 1];
+    const z = highTerm.wireframeBasePositions[i + 2];
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  const height = maxY - minY;
+  assert.ok(
+    Math.abs(height - SITE_CONFIG.shield.worldHeight) < 1e-4,
+    `Expected shield world height ${SITE_CONFIG.shield.worldHeight}, got ${height}`,
+  );
+  assert.ok(Math.abs(maxZ - 0.15 * height) < 1e-4);
+  assert.ok(Math.abs(minZ + 0.15 * height) < 1e-4);
+
+  // 5. Verify SHIELD_HEIGHT_VH = 0.42, 1.25x visual scale, unchanged 5-unit subdivision, desktop [260, 480] clamp,
+  //    mobile 30% vh, short-window nav/bottom-line clearance, and >= 40px hero name clearance
+  assert.equal(SHIELD_HEIGHT_VH, 0.42);
+  assert.equal(SITE_CONFIG.shield.SHIELD_HEIGHT_VH, 0.42);
+  assert.equal(SITE_CONFIG.shield.subdivideStepUnits, 5);
+  assert.equal(SITE_CONFIG.shield.visualScaleFactor, 1.25);
+
+  const visibleHeightAtZ0 =
+    2 * SITE_CONFIG.scroll.cameraStartZ * Math.tan((45 * Math.PI) / 360);
+
+  // Desktop 1440x900 -> exact 42% vh (378px) with same centre anchor (2.38, 0.05)
+  const desktop1440 = computeHeroShieldPlacement({
+    viewportWidth: 1440,
+    viewportHeight: 900,
+    nameRect: { left: 80, top: 340, right: 632, bottom: 520 },
+    navBottomPx: 56,
+    heroBottomLineTopPx: 828,
+  });
+  assert.equal(desktop1440.anchorX, 2.38);
+  assert.equal(desktop1440.anchorY, 0.05);
+  assert.ok(
+    Math.abs(desktop1440.finalHeightPx - 900 * 0.42) < 0.5,
+    `Expected ~378px at 1440x900, got ${desktop1440.finalHeightPx.toFixed(1)}px`,
+  );
+  const desktopHeightRatio = (height * desktop1440.scale) / visibleHeightAtZ0;
+  assert.ok(
+    Math.abs(desktopHeightRatio - 0.42) < 0.005,
+    `Expected desktop shield height ratio ~0.42, got ${(desktopHeightRatio * 100).toFixed(1)}%`,
+  );
+  assert.ok(
+    desktop1440.screenBox.left >= 632 + 40,
+    `Expected >= 40px clearance from hero name, got ${(desktop1440.screenBox.left - 632).toFixed(1)}px`,
+  );
+
+  // Ultra-tall desktop 1920x1400 -> clamped to 480px max
+  const desktopTall = computeHeroShieldPlacement({
+    viewportWidth: 1920,
+    viewportHeight: 1400,
+    nameRect: { left: 320, top: 520, right: 860, bottom: 720 },
+    navBottomPx: 56,
+    heroBottomLineTopPx: 1320,
+  });
+  assert.equal(Math.round(desktopTall.finalHeightPx), 480);
+
+  // Compact height desktop 1440x560 -> clamped to 260px min while clearing nav & bottom line
+  const desktopCompactH = computeHeroShieldPlacement({
+    viewportWidth: 1440,
+    viewportHeight: 560,
+    nameRect: { left: 80, top: 180, right: 560, bottom: 340 },
+    navBottomPx: 56,
+    heroBottomLineTopPx: 492,
+  });
+  assert.equal(Math.round(desktopCompactH.finalHeightPx), 260);
+  assert.ok(desktopCompactH.screenBox.top > 56);
+  assert.ok(desktopCompactH.screenBox.bottom < 492);
+
+  // Very short window 1440x380 -> scales below 260px so it never overlaps top nav or bottom line
+  const desktopVeryShort = computeHeroShieldPlacement({
+    viewportWidth: 1440,
+    viewportHeight: 380,
+    nameRect: { left: 80, top: 100, right: 520, bottom: 240 },
+    navBottomPx: 56,
+    heroBottomLineTopPx: 312,
+  });
+  assert.ok(desktopVeryShort.finalHeightPx < 260);
+  assert.ok(
+    desktopVeryShort.screenBox.top >= 56,
+    `Short window shield top (${desktopVeryShort.screenBox.top.toFixed(1)}) must stay below nav (56)`,
+  );
+  assert.ok(
+    desktopVeryShort.screenBox.bottom <= 312,
+    `Short window shield bottom (${desktopVeryShort.screenBox.bottom.toFixed(1)}) must stay above hero bottom line (312)`,
+  );
+
+  // Narrow desktop where name extends close to shield -> scales down just enough to keep >= 40px gap
+  const narrowNameClose = computeHeroShieldPlacement({
+    viewportWidth: 1024,
+    viewportHeight: 768,
+    nameRect: { left: 80, top: 260, right: 632, bottom: 440 },
+    navBottomPx: 56,
+    heroBottomLineTopPx: 696,
+  });
+  assert.ok(
+    narrowNameClose.screenBox.left >= 632 + 40 - 1e-6,
+    `Expected >= 40px gap on narrow desktop, got ${(narrowNameClose.screenBox.left - 632).toFixed(1)}px`,
+  );
+
+  // Mobile (< 768px) 390x844 -> 30% of viewport height (~253.2px), anchor (0, -0.78), >= 40px below name
+  const mobile390 = computeHeroShieldPlacement({
+    viewportWidth: 390,
+    viewportHeight: 844,
+    nameRect: { left: 16, top: 120, right: 340, bottom: 260 },
+    navBottomPx: 56,
+    heroBottomLineTopPx: 770,
+  });
+  assert.equal(mobile390.anchorX, 0);
+  assert.equal(mobile390.anchorY, -0.78);
+  assert.ok(
+    Math.abs(mobile390.finalHeightPx - 844 * 0.3) < 0.5,
+    `Expected ~253.2px at 390x844, got ${mobile390.finalHeightPx.toFixed(1)}px`,
+  );
+  assert.ok(
+    mobile390.screenBox.top >= 260 + 40,
+    `Mobile shield top (${mobile390.screenBox.top.toFixed(1)}) must clear hero name bottom (260) by >= 40px`,
+  );
+  assert.ok(mobile390.screenBox.bottom <= 770);
+
+  // 6. Verify all 3 SHIELD_SYMBOL options ('term', 'hat', 'code') produce distinct, valid symbol geometry
+  const highHat = generateShieldNetwork(190, 'hat', 42);
+  const highCode = generateShieldNetwork(190, 'code', 42);
+
+  assert.equal(highTerm.symbol, 'term');
+  assert.equal(highHat.symbol, 'hat');
+  assert.equal(highCode.symbol, 'code');
+
+  assert.ok(highTerm.wireframeSymbolSegments.length > 0);
+  assert.ok(highHat.wireframeSymbolSegments.length > 0);
+  assert.ok(highCode.wireframeSymbolSegments.length > 0);
+
+  // Swapping symbol produces distinct symbol segment buffers
+  assert.notDeepEqual(
+    Array.from(highTerm.wireframeSymbolSegments),
+    Array.from(highHat.wireframeSymbolSegments),
+  );
+  assert.notDeepEqual(
+    Array.from(highHat.wireframeSymbolSegments),
+    Array.from(highCode.wireframeSymbolSegments),
+  );
+
+  // Travelling packets build valid continuous walks strictly along wireframePacketEdges
+  const wfNodeCount = highTerm.wireframePhases.length;
+  const pktLoops = buildPacketEdgeLoops(highTerm.wireframePacketEdges, wfNodeCount);
+  assert.equal(pktLoops.length, SITE_CONFIG.idle.packetCount);
+});
+
+test('Hero shield symbol cycling: exact 48-node data, HOLD/MORPH state machine, 250ms/300ms edge fades, pause/resume, retargeting, and static fallbacks', () => {
+  // 1. Verify exact 48-node arrays & valid edge indices for all three symbols
+  assert.equal(termNodes.length, 48);
+  assert.equal(hatNodes.length, 48);
+  assert.equal(codeNodes.length, 48);
+  assert.equal(termEdges.length, 46);
+  assert.equal(hatEdges.length, 43);
+  assert.equal(codeEdges.length, 45);
+
+  for (const edges of [termEdges, hatEdges, codeEdges]) {
+    for (const [a, b] of edges) {
+      assert.ok(a >= 0 && a < 48 && b >= 0 && b < 48 && a !== b);
+    }
+  }
+
+  // 2. Verify all 3 z-layers' symbol targets (48 * 3 = 144 nodes) & zero-alloc segment writer
+  const net = generateShieldNetwork(190, 'term', 42);
+  assert.equal(net.symbolNodeCountPerLayer, 48);
+  assert.equal(net.symbolLayerCount, 3);
+  assert.equal(net.symbolNodeTotalCount, 144);
+  assert.equal(net.symbolTargetPositions.term.length, 144 * 3);
+  assert.equal(net.symbolTargetPositions.hat.length, 144 * 3);
+  assert.equal(net.symbolTargetPositions.code.length, 144 * 3);
+  assert.ok(net.wireframeShieldPacketEdges.length > 0);
+  assert.ok(net.symbolPacketEdges.term.length > 0);
+  assert.ok(net.symbolPacketEdges.hat.length > 0);
+  assert.ok(net.symbolPacketEdges.code.length > 0);
+
+  const maxVerts = computeMaxSymbolSegmentVertices();
+  const posBuf = new Float32Array(maxVerts * 3);
+  const driftBuf = new Float32Array(maxVerts * 3);
+  const phaseBuf = new Float32Array(maxVerts);
+  const alphaBuf = new Float32Array(maxVerts);
+  for (const sym of SYMBOL_ORDER) {
+    const written = writeSymbolSegmentsBuffer({
+      symbol: sym,
+      symbolPositions: net.symbolTargetPositions[sym],
+      symbolDrifts: net.symbolNodeDriftVectors,
+      symbolPhases: net.symbolNodePhases,
+      unitScale: net.unitScale,
+      outPositions: posBuf,
+      outDrifts: driftBuf,
+      outPhases: phaseBuf,
+      outAlphas: alphaBuf,
+    });
+    assert.ok(written > 0 && written <= maxVerts);
+  }
+
+  // 3. Full cycle state machine: term -> hat -> code -> term with exact edge fade timings
+  const state = createSymbolCycleState({
+    shieldSymbolConfig: 'cycle',
+    plainView: false,
+    prefersReducedMotion: false,
+    qualityTier: 'high',
+    saveData: false,
+  });
+  const advanceMs = (totalMs: number, isActive = true) => {
+    let remaining = totalMs;
+    let lastRes = stepSymbolCycleState(state, {
+      dtMs: 0,
+      isActive,
+      disableCycle: false,
+      staticSymbol: 'term',
+    });
+    let sawStartedMorph = false;
+    let sawSwitchedEdge = false;
+    while (remaining > 0) {
+      const step = Math.min(50, remaining);
+      remaining -= step;
+      lastRes = stepSymbolCycleState(state, {
+        dtMs: step,
+        isActive,
+        disableCycle: false,
+        staticSymbol: 'term',
+      });
+      if (lastRes.startedMorph) sawStartedMorph = true;
+      if (lastRes.switchedEdgeSymbol) sawSwitchedEdge = true;
+    }
+    return { lastRes, sawStartedMorph, sawSwitchedEdge };
+  };
+
+  assert.equal(state.phase, 'HOLD');
+  assert.equal(state.edgeSymbol, 'term');
+  assert.equal(state.edgeAlpha, 1);
+  assert.equal(state.secondsUntilNext, 5);
+
+  // Advance 4900ms in HOLD -> still term, 0.1s left
+  let stepOut = advanceMs(4900, true);
+  assert.equal(state.phase, 'HOLD');
+  assert.equal(stepOut.lastRes.activeSymbol, 'term');
+  assert.equal(state.edgeAlpha, 1);
+  assert.ok(state.secondsUntilNext !== null && Math.abs(state.secondsUntilNext - 0.1) < 1e-6);
+
+  // Advance 100ms -> enters MORPH from term -> hat
+  stepOut = advanceMs(100, true);
+  assert.equal(state.phase, 'MORPH');
+  assert.equal(stepOut.lastRes.activeSymbol, 'term');
+  assert.equal(stepOut.lastRes.targetSymbol, 'hat');
+  assert.equal(state.edgeSymbol, 'term');
+  assert.equal(state.edgeAlpha, 1);
+  assert.equal(stepOut.sawStartedMorph, true);
+  assert.equal(stepOut.sawSwitchedEdge, false);
+
+  // Fade out over first 250ms: at 125ms edgeAlpha = 0.5, at 250ms edgeAlpha = 0
+  stepOut = advanceMs(125, true);
+  assert.equal(state.phase, 'MORPH');
+  assert.equal(state.edgeSymbol, 'term');
+  assert.ok(Math.abs(state.edgeAlpha - 0.5) < 1e-6);
+
+  stepOut = advanceMs(125, true);
+  assert.equal(state.edgeAlpha, 0);
+  assert.equal(state.edgeSymbol, 'term');
+
+  // Pause mid-morph (scroll away / tab hidden) -> everything freezes cleanly
+  const pausedMorphElapsed = state.phaseElapsedMs;
+  advanceMs(3500, false);
+  assert.equal(state.phase, 'MORPH');
+  assert.equal(state.phaseElapsedMs, pausedMorphElapsed);
+  assert.equal(state.edgeAlpha, 0);
+  assert.equal(state.edgeSymbol, 'term');
+
+  // Resume and finish remaining 950ms of 1200ms morph -> swaps edgeSymbol to 'hat' with edgeAlpha starting at 0
+  stepOut = advanceMs(950, true);
+  assert.equal(state.phase, 'HOLD');
+  assert.equal(stepOut.lastRes.activeSymbol, 'hat');
+  assert.equal(state.edgeSymbol, 'hat');
+  assert.equal(stepOut.sawSwitchedEdge, true);
+  assert.equal(state.edgeAlpha, 0);
+
+  // Fade new 'hat' edges in over 300ms: at 150ms -> 0.5, at 300ms -> 1.0
+  advanceMs(150, true);
+  assert.ok(Math.abs(state.edgeAlpha - 0.5) < 1e-6);
+  advanceMs(150, true);
+  assert.equal(state.edgeAlpha, 1);
+
+  // Continue through hat -> code -> term loop
+  stepOut = advanceMs(4700, true); // finishes 5000ms HOLD on hat -> starts MORPH to code
+  assert.equal(state.phase, 'MORPH');
+  assert.equal(stepOut.lastRes.targetSymbol, 'code');
+  stepOut = advanceMs(1200, true); // finishes MORPH to code
+  assert.equal(state.phase, 'HOLD');
+  assert.equal(stepOut.lastRes.activeSymbol, 'code');
+  assert.equal(state.edgeSymbol, 'code');
+
+  stepOut = advanceMs(5000, true); // finishes HOLD on code -> starts MORPH back to term
+  assert.equal(state.phase, 'MORPH');
+  assert.equal(stepOut.lastRes.targetSymbol, 'term');
+  stepOut = advanceMs(1200, true); // finishes MORPH back to term
+  assert.equal(state.phase, 'HOLD');
+  assert.equal(stepOut.lastRes.activeSymbol, 'term');
+  assert.equal(state.edgeSymbol, 'term');
+
+  // 4. Ease-in-out + critically damped spring settles within ~1200ms and retargets mid-morph without snapping
+  assert.equal(easeInOutCubic(0), 0);
+  assert.equal(easeInOutCubic(0.5), 0.5);
+  assert.equal(easeInOutCubic(1), 1);
+
+  const count = net.symbolNodeTotalCount;
+  const cur = new Float32Array(net.symbolTargetPositions.term);
+  const vel = new Float32Array(count * 3);
+  const start = new Float32Array(cur);
+  const desired = new Float32Array(count * 3);
+  const targetHat = net.symbolTargetPositions.hat;
+  const targetCode = net.symbolTargetPositions.code;
+  const omega = 16.0 / (SYMBOL_MORPH_MS / 1000);
+  const rampMs = SYMBOL_MORPH_MS * 0.8;
+
+  // Step 600ms (halfway) toward 'hat', then retarget mid-morph to 'code' without zeroing velocity
+  const dt = 1 / 60;
+  for (let f = 0; f < 36; f++) {
+    const t = Math.min(1, ((f + 1) * dt * 1000) / rampMs);
+    const e = easeInOutCubic(t);
+    for (let j = 0; j < count * 3; j++) {
+      desired[j] = start[j] + (targetHat[j] - start[j]) * e;
+    }
+    stepCriticallyDampedSpringBuffer(cur, vel, desired, dt, omega);
+  }
+  const beforeRetarget = new Float32Array(cur);
+  start.set(cur);
+  // First step after retargeting to 'code' must move continuously (no teleport/snap)
+  const e1 = easeInOutCubic((dt * 1000) / rampMs);
+  for (let j = 0; j < count * 3; j++) {
+    desired[j] = start[j] + (targetCode[j] - start[j]) * e1;
+  }
+  stepCriticallyDampedSpringBuffer(cur, vel, desired, dt, omega);
+  let maxSingleFrameJump = 0;
+  for (let j = 0; j < count * 3; j++) {
+    const d = Math.abs(cur[j] - beforeRetarget[j]);
+    if (d > maxSingleFrameJump) maxSingleFrameJump = d;
+  }
+  assert.ok(
+    maxSingleFrameJump < 0.08,
+    `Mid-morph retarget must not snap (max single-frame delta ${maxSingleFrameJump.toFixed(4)})`,
+  );
+
+  // Run full 1200ms clean morph from start -> targetCode and verify tight settlement
+  for (let f = 1; f < 72; f++) {
+    const t = Math.min(1, ((f + 1) * dt * 1000) / rampMs);
+    const e = easeInOutCubic(t);
+    for (let j = 0; j < count * 3; j++) {
+      desired[j] = start[j] + (targetCode[j] - start[j]) * e;
+    }
+    stepCriticallyDampedSpringBuffer(cur, vel, desired, dt, omega);
+  }
+  let maxResidual = 0;
+  for (let j = 0; j < count * 3; j++) {
+    const err = Math.abs(cur[j] - targetCode[j]);
+    if (err > maxResidual) maxResidual = err;
+  }
+  assert.ok(
+    maxResidual < 0.03,
+    `Expected tight settlement within 1200ms, got max residual ${maxResidual.toFixed(4)}`,
+  );
+
+  // 5. Fallback rules: low tier, prefers-reduced-motion, Save-Data, Plain view -> static 'term'; fixed config -> fixed symbol
+  assert.equal(
+    shouldDisableSymbolCycle({
+      shieldSymbolConfig: 'cycle',
+      plainView: false,
+      prefersReducedMotion: false,
+      qualityTier: 'high',
+      saveData: false,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldDisableSymbolCycle({
+      shieldSymbolConfig: 'cycle',
+      plainView: false,
+      prefersReducedMotion: false,
+      qualityTier: 'low',
+      saveData: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDisableSymbolCycle({
+      shieldSymbolConfig: 'cycle',
+      plainView: false,
+      prefersReducedMotion: true,
+      qualityTier: 'high',
+      saveData: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDisableSymbolCycle({
+      shieldSymbolConfig: 'cycle',
+      plainView: false,
+      prefersReducedMotion: false,
+      qualityTier: 'high',
+      saveData: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDisableSymbolCycle({
+      shieldSymbolConfig: 'cycle',
+      plainView: true,
+      prefersReducedMotion: false,
+      qualityTier: 'high',
+      saveData: false,
+    }),
+    true,
+  );
+  assert.equal(
+    resolveStaticShieldSymbol({
+      shieldSymbolConfig: 'cycle',
+      plainView: false,
+      prefersReducedMotion: true,
+      qualityTier: 'high',
+      saveData: false,
+    }),
+    'term',
+  );
+  assert.equal(
+    resolveStaticShieldSymbol({
+      shieldSymbolConfig: 'hat',
+      plainView: false,
+      prefersReducedMotion: false,
+      qualityTier: 'high',
+      saveData: false,
+    }),
+    'hat',
+  );
+  assert.equal(
+    resolveStaticShieldSymbol({
+      shieldSymbolConfig: 'code',
+      plainView: false,
+      prefersReducedMotion: false,
+      qualityTier: 'low',
+      saveData: false,
+    }),
+    'term',
+  );
+});
+
+
 
 
 

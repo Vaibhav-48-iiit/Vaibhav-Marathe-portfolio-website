@@ -4,18 +4,23 @@ import {
   SITE_CONFIG,
   type MorphStateName,
   type QualityTierName,
+  type ShieldSymbolName,
   type ThemeMode,
 } from './config';
 import {
   buildPacketEdgeLoops,
   computeHashMorphProgress,
+  computeHeroShieldPlacement,
   computeIdleMotionScale,
+  computeMaxSymbolSegmentVertices,
   computeShapeEffectiveMaxOpacity,
   computeShapeScreenBoundingBox,
   computeTopologyNodePortScanIntensities,
+  createSymbolCycleState,
   downgradeQualityTier,
+  easeInOutCubic,
   generateAmbientDepthField,
-  generateDeltaNetwork,
+  generateShieldNetwork,
   generateTopologyTargets,
   hexToRgbNormalized,
   isSaveDataEnabled,
@@ -23,14 +28,20 @@ import {
   resolveMorphParticleCount,
   resolveQualityTierProfile,
   resolveStartingQualityTier,
+  resolveStaticShieldSymbol,
   selectNonOverlappingLitLeafNodes,
   shouldDisableMorph,
+  shouldDisableSymbolCycle,
   stepCriticallyDampedSpringBuffer,
   stepMorphStateMachine,
+  stepSymbolCycleState,
+  writeSymbolSegmentsBuffer,
   type GlyphPairTargetData,
+  type PacketEdgeLoop,
   type QualityTierProfile,
   type ScreenBoxRect,
   type ScrollMetrics,
+  type SymbolCycleState,
   type TopologyTargetData,
 } from './particleMath';
 import type { ScrollArrivalController } from './PortfolioSections';
@@ -45,6 +56,9 @@ export interface SceneDebugStats {
   morphState: MorphStateName;
   morphParticleCount: number;
   clearAlpha: number;
+  shieldSymbol: ShieldSymbolName;
+  shieldSymbolNextSec: number | null;
+  shieldSymbolPhase: 'HOLD' | 'MORPH' | 'STATIC';
 }
 
 export interface DeltaSceneProps {
@@ -148,16 +162,68 @@ interface MorphPoolRuntime {
   glyphData: GlyphPairTargetData | null;
 }
 
+interface SymbolMorphRuntime {
+  nodeTotalCount: number;
+  unitScale: number;
+  curPos: Float32Array;
+  vel: Float32Array;
+  morphStartPos: Float32Array;
+  interpTarget: Float32Array;
+  drifts: Float32Array;
+  phases: Float32Array;
+  targets: Record<ShieldSymbolName, Float32Array>;
+  packetEdges: Record<ShieldSymbolName, Uint16Array>;
+  posAttr: THREE.BufferAttribute;
+  edgePosBuf: Float32Array;
+  edgeDriftBuf: Float32Array;
+  edgePhaseBuf: Float32Array;
+  edgeAlphaBuf: Float32Array;
+  edgePosAttr: THREE.BufferAttribute;
+  edgeDriftAttr: THREE.BufferAttribute;
+  edgePhaseAttr: THREE.BufferAttribute;
+  edgeAlphaAttr: THREE.BufferAttribute;
+  packetLoops: PacketEdgeLoop[];
+  pktStartPos: Float32Array;
+  pktEndPos: Float32Array;
+  pktStartDrift: Float32Array;
+  pktEndDrift: Float32Array;
+  pktPhases: Float32Array;
+  pktMeta: Float32Array;
+  pktStartPosAttr: THREE.BufferAttribute;
+  pktEndPosAttr: THREE.BufferAttribute;
+  pktStartDriftAttr: THREE.BufferAttribute;
+  pktEndDriftAttr: THREE.BufferAttribute;
+  pktPhasesAttr: THREE.BufferAttribute;
+  pktMetaAttr: THREE.BufferAttribute;
+  symbolPacketCount: number;
+  hopsPerLoop: number;
+  trailSamplesPerPacket: number;
+  isSettled: boolean;
+  lastTargetSymbol: ShieldSymbolName;
+  syncEdgeBuffer: (sym: ShieldSymbolName) => void;
+  rebuildPackets: (sym: ShieldSymbolName) => void;
+  refreshPacketEndpoints: () => void;
+}
+
 interface TierSceneMeshes {
   pointsGeometry: THREE.BufferGeometry;
   pointsMaterial: THREE.ShaderMaterial;
   pointsMesh: THREE.Points;
+  symbolPointsGeometry: THREE.BufferGeometry;
+  symbolPointsMesh: THREE.Points;
   lineGeometry: THREE.BufferGeometry;
   lineMaterial: THREE.ShaderMaterial;
   lineSegments: THREE.LineSegments;
+  symbolLineGeometry: THREE.BufferGeometry;
+  symbolLineMaterial: THREE.ShaderMaterial;
+  symbolLineSegments: THREE.LineSegments;
   packetGeometry: THREE.BufferGeometry;
   packetMaterial: THREE.ShaderMaterial;
   packetPoints: THREE.Points;
+  symbolPacketGeometry: THREE.BufferGeometry;
+  symbolPacketMaterial: THREE.ShaderMaterial;
+  symbolPacketPoints: THREE.Points;
+  symbolRuntime: SymbolMorphRuntime;
   ambientGeometry: THREE.BufferGeometry;
   ambientMaterial: THREE.ShaderMaterial;
   ambientPoints: THREE.Points;
@@ -221,6 +287,93 @@ function measureSectionTextRects(
 }
 
 /**
+ * Measures hero-top (scrollY = 0 invariant) DOM bounding boxes for the fixed top nav bar,
+ * the hero name ("VAIBHAV MARATHE"), and the bottom border-t bar of #home.
+ * Called only on mount / resize / fonts-ready (never per frame).
+ */
+function measureHeroClearanceBounds(): {
+  nameRect: ScreenBoxRect | null;
+  opaqueContainerRect: ScreenBoxRect | null;
+  navBottomPx: number;
+  heroBottomLineTopPx: number;
+} {
+  const vh = typeof window !== 'undefined' ? Math.max(1, window.innerHeight) : 900;
+  if (typeof document === 'undefined') {
+    return {
+      nameRect: null,
+      opaqueContainerRect: null,
+      navBottomPx: 56,
+      heroBottomLineTopPx: vh - 68,
+    };
+  }
+
+  const headerEl = document.querySelector('header') as HTMLElement | null;
+  const navBottomPx = headerEl
+    ? Math.max(0, headerEl.getBoundingClientRect().bottom)
+    : 56;
+
+  const homeEl = document.getElementById('home');
+  const homeTop = homeEl ? homeEl.getBoundingClientRect().top : 0;
+
+  let nameRect: ScreenBoxRect | null = null;
+  let opaqueContainerRect: ScreenBoxRect | null = null;
+  const titleEl = document.querySelector(
+    '[data-testid="hero-main-title"]',
+  ) as HTMLElement | null;
+  if (titleEl) {
+    // Measure actual rendered text glyphs of "VAIBHAV MARATHE" via Range (not empty block padding)
+    let r = titleEl.getBoundingClientRect();
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(titleEl);
+      const tight = range.getBoundingClientRect();
+      if (tight.width > 0 && tight.height > 0) {
+        r = tight;
+      }
+    } catch {
+      // Fall back to element bounding rect if Range is unavailable
+    }
+    if (r.width > 0 && r.height > 0) {
+      nameRect = {
+        left: r.left,
+        right: r.right,
+        top: r.top - homeTop,
+        bottom: r.bottom - homeTop,
+      };
+    }
+
+    const parentEl = titleEl.parentElement;
+    if (parentEl) {
+      const pr = parentEl.getBoundingClientRect();
+      if (pr.width > 0 && pr.height > 0) {
+        opaqueContainerRect = {
+          left: pr.left,
+          right: pr.right,
+          top: pr.top - homeTop,
+          bottom: pr.bottom - homeTop,
+        };
+      }
+    }
+  }
+
+  let heroBottomLineTopPx = vh - 68;
+  const bottomBarEl = homeEl?.lastElementChild as HTMLElement | null;
+  if (bottomBarEl) {
+    const br = bottomBarEl.getBoundingClientRect();
+    if (br.height > 0) {
+      heroBottomLineTopPx = br.top - homeTop;
+    }
+  }
+
+  return {
+    nameRect,
+    opaqueContainerRect,
+    navBottomPx,
+    heroBottomLineTopPx,
+  };
+}
+
+/**
  * DeltaScene
  * ----------
  * Renders:
@@ -245,6 +398,14 @@ export function DeltaScene({
   const mountRef = useRef<HTMLDivElement | null>(null);
   const reducedMotionRef = useRef<boolean>(reducedMotion);
   const debugCallbackRef = useRef<typeof onDebugStatsChange>(onDebugStatsChange);
+  const symbolCycleRef = useRef<SymbolCycleState>(
+    createSymbolCycleState({
+      plainView: false,
+      prefersReducedMotion: reducedMotion,
+      qualityTier: 'high',
+      saveData: isSaveDataEnabled(),
+    }),
+  );
 
   useEffect(() => {
     reducedMotionRef.current = reducedMotion;
@@ -286,6 +447,13 @@ export function DeltaScene({
         viewportWidth: window.innerWidth,
       });
 
+    symbolCycleRef.current = createSymbolCycleState({
+      plainView: false,
+      prefersReducedMotion: reducedMotionRef.current,
+      qualityTier: currentProfile.tier,
+      saveData,
+    });
+
     const initialThemeMode: ThemeMode = getTheme();
     const buildPaletteForTheme = (mode: ThemeMode) => {
       const t = SITE_CONFIG.theme.themes[mode];
@@ -294,6 +462,7 @@ export function DeltaScene({
         clearColorHex: t.background,
         clearRgb: hexToRgbNormalized(t.background),
         nodeBaseRgb: hexToRgbNormalized(t.sceneNodeColor),
+        mutedNodeRgb: hexToRgbNormalized(t.textMuted),
         ambientBaseRgb:
           mode === 'light'
             ? hexToRgbNormalized(t.sceneNodeColor)
@@ -398,6 +567,13 @@ export function DeltaScene({
           initPal.nodeBaseRgb[2],
         ),
       },
+      uShieldNodeColor: {
+        value: new THREE.Vector3(
+          initPal.mutedNodeRgb[0],
+          initPal.mutedNodeRgb[1],
+          initPal.mutedNodeRgb[2],
+        ),
+      },
       uAmbientBaseColor: {
         value: new THREE.Vector3(
           initPal.ambientBaseRgb[0],
@@ -433,30 +609,53 @@ export function DeltaScene({
       uMaxNodePointSizePx: { value: SITE_CONFIG.performance.maxNodePointSizePx },
       uMaxAmbientPointSizePx: { value: SITE_CONFIG.performance.maxAmbientPointSizePx },
       uMaxNearCameraAlpha: { value: SITE_CONFIG.performance.maxNearCameraAlpha },
+      uShieldVisualScale: { value: SITE_CONFIG.shield.visualScaleFactor },
+      uHeroSizeTrim: { value: 1.0 },
+      uHeroAlphaTrim: { value: 1.0 },
+      uSymbolEdgeAlpha: { value: 1.0 },
+      uSymbolPacketTime: { value: 0.0 },
     };
 
     let isDisposed = false;
 
     const buildTierMeshes = (profile: QualityTierProfile): TierSceneMeshes => {
-      const network = generateDeltaNetwork(profile.particleCount, 42);
+      const cycleState = symbolCycleRef.current;
+      const startSymbol: ShieldSymbolName = shouldDisableSymbolCycle({
+        plainView: false,
+        prefersReducedMotion: reducedMotionRef.current,
+        qualityTier: profile.tier,
+        saveData,
+      })
+        ? resolveStaticShieldSymbol({
+            plainView: false,
+            prefersReducedMotion: reducedMotionRef.current,
+            qualityTier: profile.tier,
+            saveData,
+          })
+        : cycleState.edgeSymbol;
 
-      // --- A. LATTICE NODES (GPU ShaderMaterial with capped point size & near-camera alpha) ---
+      const network = generateShieldNetwork(profile.particleCount, startSymbol, 42);
+
+      // --- A1. SHIELD NODES (muted colour, static during symbol cycling) ---
+      const shieldDotCount = network.shieldOnlyPhases.length;
+      const shieldIsSymbolAttr = new Float32Array(shieldDotCount); // all 0
+
       const pointsGeometry = new THREE.BufferGeometry();
       pointsGeometry.setAttribute(
         'position',
-        new THREE.BufferAttribute(network.basePositions, 3),
+        new THREE.BufferAttribute(network.shieldOnlyPositions, 3),
       );
       pointsGeometry.setAttribute(
         'aDrift',
-        new THREE.BufferAttribute(network.driftVectors, 3),
+        new THREE.BufferAttribute(network.shieldOnlyDrifts, 3),
       );
       pointsGeometry.setAttribute(
         'aPhase',
-        new THREE.BufferAttribute(network.phases, 1),
+        new THREE.BufferAttribute(network.shieldOnlyPhases, 1),
       );
       pointsGeometry.setAttribute(
-        'aColor',
-        new THREE.BufferAttribute(network.nodeColors, 3),
+        'aIsSymbol',
+        new THREE.BufferAttribute(shieldIsSymbolAttr, 1),
       );
 
       const baseNodeSize = profile.isMobile ? 0.09 : 0.082;
@@ -468,7 +667,7 @@ export function DeltaScene({
         vertexShader: /* glsl */ `
           attribute vec3 aDrift;
           attribute float aPhase;
-          attribute vec3 aColor;
+          attribute float aIsSymbol;
 
           uniform float uBasePointSize;
           uniform float uThemePointSizeScale;
@@ -479,11 +678,14 @@ export function DeltaScene({
           uniform float uScanPulseIntensity;
           uniform float uMaxNodePointSizePx;
           uniform float uMorphDim;
-          uniform vec3 uNodeBaseColor;
+          uniform float uShieldVisualScale;
+          uniform float uHeroSizeTrim;
+          uniform vec3 uShieldNodeColor;
           uniform vec3 uAccentColor;
 
           varying vec3 vColor;
           varying float vDepthAlpha;
+          varying float vIsSymbol;
 
           ${SHARED_IDLE_SCROLL_GLSL}
 
@@ -500,17 +702,18 @@ export function DeltaScene({
 
             if (uEnableScanPulse > 0.5 && uIdleScale > 0.01) {
               float scanPhase = fract(uTime / max(0.1, uScanPulsePeriod));
-              float scanY = mix(2.6, -1.8, scanPhase);
-              float band = smoothstep(0.55, 0.0, abs(position.y - scanY));
+              float scanY = mix(1.0, -1.0, scanPhase);
+              float band = smoothstep(0.35, 0.0, abs(position.y - scanY));
               pulseBoost = band * uScanPulseIntensity * uIdleScale;
             }
 
-            float rawSize = (uBasePointSize * uThemePointSizeScale * (1.0 + pulseBoost * 0.35) * uViewportHeight * 0.55 * uPixelRatio) / dist;
-            gl_PointSize = clamp(rawSize, 1.5 * uPixelRatio, uMaxNodePointSizePx * uThemePointSizeScale * uPixelRatio);
+            float nodeScale = uShieldVisualScale * uHeroSizeTrim;
+            float rawSize = (uBasePointSize * nodeScale * uThemePointSizeScale * (1.0 + pulseBoost * 0.35) * uViewportHeight * 0.55 * uPixelRatio) / dist;
+            gl_PointSize = clamp(rawSize, 1.5 * uPixelRatio, uMaxNodePointSizePx * nodeScale * uThemePointSizeScale * uPixelRatio);
 
-            float isAccent = 1.0 - step(0.45, aColor.r);
-            vec3 baseNodeCol = mix(uNodeBaseColor, uAccentColor, isAccent);
+            vec3 baseNodeCol = mix(uShieldNodeColor, uAccentColor, aIsSymbol);
             vColor = mix(baseNodeCol, uAccentColor, clamp(pulseBoost, 0.0, 1.0));
+            vIsSymbol = aIsSymbol;
             float fogDist = length(mvPosition.xyz);
             // Dim dispersed hero particles so they never pass behind body text at high brightness
             float scrollDim = mix(1.0, 0.22, clamp(uScrollProgress, 0.0, 1.0));
@@ -519,8 +722,10 @@ export function DeltaScene({
         `,
         fragmentShader: /* glsl */ `
           uniform float uMaxNearCameraAlpha;
+          uniform float uHeroAlphaTrim;
           varying vec3 vColor;
           varying float vDepthAlpha;
+          varying float vIsSymbol;
 
           void main() {
             if (vDepthAlpha < 0.01) discard;
@@ -528,7 +733,8 @@ export function DeltaScene({
             float r2 = dot(cxy, cxy);
             if (r2 > 1.0) discard;
             float softEdge = smoothstep(1.0, 0.3, r2);
-            float alpha = min(uMaxNearCameraAlpha, 0.90 * softEdge * vDepthAlpha);
+            float maxCap = mix(uMaxNearCameraAlpha, 0.92, vIsSymbol);
+            float alpha = min(maxCap, 0.90 * softEdge * vDepthAlpha) * uHeroAlphaTrim;
             gl_FragColor = vec4(vColor, alpha);
           }
         `,
@@ -540,42 +746,119 @@ export function DeltaScene({
       pointsMesh.frustumCulled = false;
       deltaGroup.add(pointsMesh);
 
-      // --- B. CONNECTING LATTICE EDGES ---
-      const edgeCount = network.edgeIndices.length / 2;
-      const edgePositions = new Float32Array(edgeCount * 6);
-      const edgeDrifts = new Float32Array(edgeCount * 6);
-      const edgePhases = new Float32Array(edgeCount * 2);
+      // --- A2. INTERIOR SYMBOL NODES (48 per z-layer x 3 z-layers = 144 nodes, accent colour, morph together) ---
+      const symNodeTotal = network.symbolNodeTotalCount;
+      const symbolCurPos = new Float32Array(network.symbolNodeBasePositions);
+      const symbolVel = new Float32Array(symNodeTotal * 3);
+      const symbolMorphStartPos = new Float32Array(network.symbolNodeBasePositions);
+      const symbolInterpTarget = new Float32Array(network.symbolNodeBasePositions);
+      const symbolIsSymbolAttr = new Float32Array(symNodeTotal);
+      symbolIsSymbolAttr.fill(1.0);
 
-      for (let e = 0; e < edgeCount; e++) {
-        const idxA = network.edgeIndices[e * 2];
-        const idxB = network.edgeIndices[e * 2 + 1];
+      const symbolPointsGeometry = new THREE.BufferGeometry();
+      const symbolPosAttr = new THREE.BufferAttribute(symbolCurPos, 3);
+      symbolPosAttr.setUsage(THREE.DynamicDrawUsage);
+      symbolPointsGeometry.setAttribute('position', symbolPosAttr);
+      symbolPointsGeometry.setAttribute(
+        'aDrift',
+        new THREE.BufferAttribute(network.symbolNodeDriftVectors, 3),
+      );
+      symbolPointsGeometry.setAttribute(
+        'aPhase',
+        new THREE.BufferAttribute(network.symbolNodePhases, 1),
+      );
+      symbolPointsGeometry.setAttribute(
+        'aIsSymbol',
+        new THREE.BufferAttribute(symbolIsSymbolAttr, 1),
+      );
+
+      const symbolPointsMesh = new THREE.Points(symbolPointsGeometry, pointsMaterial);
+      symbolPointsMesh.frustumCulled = false;
+      deltaGroup.add(symbolPointsMesh);
+
+      // --- B1. SHIELD WIREFRAME EDGES (thin low-alpha line style across 3 z-layers, scaled ~1.25x for larger shield) ---
+      const shieldEdgeCount = network.wireframeShieldEdgeIndices.length / 2;
+      const shieldUnitScale = SITE_CONFIG.shield.worldHeight / 108;
+      const frontTwinOffsetWorld = 0.075 * shieldUnitScale;
+
+      const edgePosList: number[] = [];
+      const edgeDriftList: number[] = [];
+      const edgePhaseList: number[] = [];
+      const edgeAlphaList: number[] = [];
+
+      const pushShieldEdgeSegment = (
+        a3: number,
+        b3: number,
+        idxA: number,
+        idxB: number,
+        alphaW: number,
+        offX = 0,
+        offY = 0,
+      ) => {
+        edgePosList.push(
+          network.wireframeBasePositions[a3] + offX,
+          network.wireframeBasePositions[a3 + 1] + offY,
+          network.wireframeBasePositions[a3 + 2],
+          network.wireframeBasePositions[b3] + offX,
+          network.wireframeBasePositions[b3 + 1] + offY,
+          network.wireframeBasePositions[b3 + 2],
+        );
+        edgeDriftList.push(
+          network.wireframeDriftVectors[a3],
+          network.wireframeDriftVectors[a3 + 1],
+          network.wireframeDriftVectors[a3 + 2],
+          network.wireframeDriftVectors[b3],
+          network.wireframeDriftVectors[b3 + 1],
+          network.wireframeDriftVectors[b3 + 2],
+        );
+        edgePhaseList.push(network.wireframePhases[idxA], network.wireframePhases[idxB]);
+        edgeAlphaList.push(alphaW, alphaW);
+      };
+
+      for (let e = 0; e < shieldEdgeCount; e++) {
+        const idxA = network.wireframeShieldEdgeIndices[e * 2];
+        const idxB = network.wireframeShieldEdgeIndices[e * 2 + 1];
 
         const a3 = idxA * 3;
         const b3 = idxB * 3;
-        const out6 = e * 6;
+        const az = network.wireframeBasePositions[a3 + 2];
+        const bz = network.wireframeBasePositions[b3 + 2];
+        const w = network.wireframeShieldEdgeAlpha[e] ?? 1.0;
 
-        edgePositions[out6] = network.basePositions[a3];
-        edgePositions[out6 + 1] = network.basePositions[a3 + 1];
-        edgePositions[out6 + 2] = network.basePositions[a3 + 2];
-        edgePositions[out6 + 3] = network.basePositions[b3];
-        edgePositions[out6 + 4] = network.basePositions[b3 + 1];
-        edgePositions[out6 + 5] = network.basePositions[b3 + 2];
-
-        edgeDrifts[out6] = network.driftVectors[a3];
-        edgeDrifts[out6 + 1] = network.driftVectors[a3 + 1];
-        edgeDrifts[out6 + 2] = network.driftVectors[a3 + 2];
-        edgeDrifts[out6 + 3] = network.driftVectors[b3];
-        edgeDrifts[out6 + 4] = network.driftVectors[b3 + 1];
-        edgeDrifts[out6 + 5] = network.driftVectors[b3 + 2];
-
-        edgePhases[e * 2] = network.phases[idxA];
-        edgePhases[e * 2 + 1] = network.phases[idxB];
+        // Front in-plane shield outline & radial edges get a tight sub-pixel twin strand (~1.25x visual thickness)
+        if (az > 0.01 && bz > 0.01) {
+          const ax = network.wireframeBasePositions[a3];
+          const ay = network.wireframeBasePositions[a3 + 1];
+          const bx = network.wireframeBasePositions[b3];
+          const by = network.wireframeBasePositions[b3 + 1];
+          const segLen = Math.hypot(bx - ax, by - ay) || 1;
+          const nx = (-(by - ay) / segLen) * frontTwinOffsetWorld;
+          const ny = ((bx - ax) / segLen) * frontTwinOffsetWorld;
+          const twinAlpha = w * 0.72;
+          pushShieldEdgeSegment(a3, b3, idxA, idxB, twinAlpha, -nx, -ny);
+          pushShieldEdgeSegment(a3, b3, idxA, idxB, twinAlpha, nx, ny);
+        } else {
+          pushShieldEdgeSegment(a3, b3, idxA, idxB, w);
+        }
       }
 
       const lineGeometry = new THREE.BufferGeometry();
-      lineGeometry.setAttribute('position', new THREE.BufferAttribute(edgePositions, 3));
-      lineGeometry.setAttribute('aDrift', new THREE.BufferAttribute(edgeDrifts, 3));
-      lineGeometry.setAttribute('aPhase', new THREE.BufferAttribute(edgePhases, 1));
+      lineGeometry.setAttribute(
+        'position',
+        new THREE.BufferAttribute(new Float32Array(edgePosList), 3),
+      );
+      lineGeometry.setAttribute(
+        'aDrift',
+        new THREE.BufferAttribute(new Float32Array(edgeDriftList), 3),
+      );
+      lineGeometry.setAttribute(
+        'aPhase',
+        new THREE.BufferAttribute(new Float32Array(edgePhaseList), 1),
+      );
+      lineGeometry.setAttribute(
+        'aEdgeAlpha',
+        new THREE.BufferAttribute(new Float32Array(edgeAlphaList), 1),
+      );
 
       const lineMaterial = new THREE.ShaderMaterial({
         uniforms: {
@@ -584,8 +867,11 @@ export function DeltaScene({
         vertexShader: /* glsl */ `
           attribute vec3 aDrift;
           attribute float aPhase;
+          attribute float aEdgeAlpha;
           uniform float uMorphDim;
           uniform float uLineBaseAlpha;
+          uniform float uShieldVisualScale;
+          uniform float uHeroAlphaTrim;
 
           varying float vLineAlpha;
 
@@ -598,7 +884,7 @@ export function DeltaScene({
 
             float p = clamp(uScrollProgress, 0.0, 1.0);
             float smoothP = p * p * (3.0 - 2.0 * p);
-            vLineAlpha = uLineBaseAlpha * pow(1.0 - smoothP, 2.2) * uMorphDim;
+            vLineAlpha = min(0.55, uLineBaseAlpha * uShieldVisualScale * aEdgeAlpha) * pow(1.0 - smoothP, 2.2) * uMorphDim * uHeroAlphaTrim;
           }
         `,
         fragmentShader: /* glsl */ `
@@ -618,16 +904,109 @@ export function DeltaScene({
       lineSegments.frustumCulled = false;
       deltaGroup.add(lineSegments);
 
-      // --- C. TRAVELLING EDGE PACKETS ---
-      const packetLoops = buildPacketEdgeLoops(
-        network.edgeIndices,
-        profile.particleCount,
-        SITE_CONFIG.idle.packetCount,
-        SITE_CONFIG.idle.packetPathHops,
+      // --- B2. INTERIOR SYMBOL EDGES (pre-allocated dynamic buffer, fades out/in cleanly on morph) ---
+      const maxSymVerts = computeMaxSymbolSegmentVertices();
+      const edgePosBuf = new Float32Array(maxSymVerts * 3);
+      const edgeDriftBuf = new Float32Array(maxSymVerts * 3);
+      const edgePhaseBuf = new Float32Array(maxSymVerts);
+      const edgeAlphaBuf = new Float32Array(maxSymVerts);
+
+      const edgePosAttr = new THREE.BufferAttribute(edgePosBuf, 3);
+      edgePosAttr.setUsage(THREE.DynamicDrawUsage);
+      const edgeDriftAttr = new THREE.BufferAttribute(edgeDriftBuf, 3);
+      edgeDriftAttr.setUsage(THREE.DynamicDrawUsage);
+      const edgePhaseAttr = new THREE.BufferAttribute(edgePhaseBuf, 1);
+      edgePhaseAttr.setUsage(THREE.DynamicDrawUsage);
+      const edgeAlphaAttr = new THREE.BufferAttribute(edgeAlphaBuf, 1);
+      edgeAlphaAttr.setUsage(THREE.DynamicDrawUsage);
+
+      const symbolLineGeometry = new THREE.BufferGeometry();
+      symbolLineGeometry.setAttribute('position', edgePosAttr);
+      symbolLineGeometry.setAttribute('aDrift', edgeDriftAttr);
+      symbolLineGeometry.setAttribute('aPhase', edgePhaseAttr);
+      symbolLineGeometry.setAttribute('aEdgeAlpha', edgeAlphaAttr);
+
+      const syncEdgeBuffer = (sym: ShieldSymbolName) => {
+        const vertCount = writeSymbolSegmentsBuffer({
+          symbol: sym,
+          symbolPositions: symbolCurPos,
+          symbolDrifts: network.symbolNodeDriftVectors,
+          symbolPhases: network.symbolNodePhases,
+          unitScale: network.unitScale,
+          outPositions: edgePosBuf,
+          outDrifts: edgeDriftBuf,
+          outPhases: edgePhaseBuf,
+          outAlphas: edgeAlphaBuf,
+        });
+        symbolLineGeometry.setDrawRange(0, vertCount);
+        edgePosAttr.needsUpdate = true;
+        edgeDriftAttr.needsUpdate = true;
+        edgePhaseAttr.needsUpdate = true;
+        edgeAlphaAttr.needsUpdate = true;
+      };
+      syncEdgeBuffer(startSymbol);
+
+      const symbolLineMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          ...sharedUniforms,
+        },
+        vertexShader: /* glsl */ `
+          attribute vec3 aDrift;
+          attribute float aPhase;
+          attribute float aEdgeAlpha;
+          uniform float uMorphDim;
+          uniform float uSymbolEdgeAlpha;
+          uniform float uHeroAlphaTrim;
+
+          varying float vLineAlpha;
+
+          ${SHARED_IDLE_SCROLL_GLSL}
+
+          void main() {
+            vec3 blendedPos = computeBlendedPosition(position, aDrift, aPhase);
+            vec4 mvPosition = modelViewMatrix * vec4(blendedPos, 1.0);
+            gl_Position = projectionMatrix * mvPosition;
+
+            float p = clamp(uScrollProgress, 0.0, 1.0);
+            float smoothP = p * p * (3.0 - 2.0 * p);
+            vLineAlpha = aEdgeAlpha * uSymbolEdgeAlpha * pow(1.0 - smoothP, 2.2) * uMorphDim * uHeroAlphaTrim;
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          uniform vec3 uAccentColor;
+          varying float vLineAlpha;
+
+          void main() {
+            if (vLineAlpha < 0.005) discard;
+            gl_FragColor = vec4(uAccentColor, vLineAlpha);
+          }
+        `,
+        transparent: true,
+        depthWrite: false,
+      });
+
+      const symbolLineSegments = new THREE.LineSegments(
+        symbolLineGeometry,
+        symbolLineMaterial,
       );
+      symbolLineSegments.frustumCulled = false;
+      deltaGroup.add(symbolLineSegments);
+
+      // --- C1. TRAVELLING SHIELD EDGE PACKETS (continue uninterrupted throughout symbol morphs) ---
+      const wfNodeCount = network.wireframePhases.length;
+      const shieldPacketCount = Math.max(3, SITE_CONFIG.idle.packetCount - 2);
+      const symbolPacketCount = Math.max(1, SITE_CONFIG.idle.packetCount - shieldPacketCount);
       const hopsPerLoop = SITE_CONFIG.idle.packetPathHops;
       const trailSamplesPerPacket = 6;
-      const totalPacketVertices = packetLoops.length * hopsPerLoop * trailSamplesPerPacket;
+
+      const shieldPacketLoops = buildPacketEdgeLoops(
+        network.wireframeShieldPacketEdges,
+        wfNodeCount,
+        shieldPacketCount,
+        hopsPerLoop,
+        1337,
+      );
+      const totalPacketVertices = shieldPacketLoops.length * hopsPerLoop * trailSamplesPerPacket;
 
       const pktStartPos = new Float32Array(totalPacketVertices * 3);
       const pktEndPos = new Float32Array(totalPacketVertices * 3);
@@ -637,8 +1016,8 @@ export function DeltaScene({
       const pktMeta = new Float32Array(totalPacketVertices * 3);
 
       let vCursor = 0;
-      for (let pIdx = 0; pIdx < packetLoops.length; pIdx++) {
-        const loop = packetLoops[pIdx];
+      for (let pIdx = 0; pIdx < shieldPacketLoops.length; pIdx++) {
+        const loop = shieldPacketLoops[pIdx];
         for (let h = 0; h < hopsPerLoop; h++) {
           const nodeA = loop.hopNodePairs[h * 2];
           const nodeB = loop.hopNodePairs[h * 2 + 1];
@@ -650,24 +1029,24 @@ export function DeltaScene({
             const v2 = vCursor * 2;
             const trailFrac = tSample / Math.max(1, trailSamplesPerPacket - 1);
 
-            pktStartPos[v3] = network.basePositions[a3];
-            pktStartPos[v3 + 1] = network.basePositions[a3 + 1];
-            pktStartPos[v3 + 2] = network.basePositions[a3 + 2];
+            pktStartPos[v3] = network.wireframeBasePositions[a3];
+            pktStartPos[v3 + 1] = network.wireframeBasePositions[a3 + 1];
+            pktStartPos[v3 + 2] = network.wireframeBasePositions[a3 + 2];
 
-            pktEndPos[v3] = network.basePositions[b3];
-            pktEndPos[v3 + 1] = network.basePositions[b3 + 1];
-            pktEndPos[v3 + 2] = network.basePositions[b3 + 2];
+            pktEndPos[v3] = network.wireframeBasePositions[b3];
+            pktEndPos[v3 + 1] = network.wireframeBasePositions[b3 + 1];
+            pktEndPos[v3 + 2] = network.wireframeBasePositions[b3 + 2];
 
-            pktStartDrift[v3] = network.driftVectors[a3];
-            pktStartDrift[v3 + 1] = network.driftVectors[a3 + 1];
-            pktStartDrift[v3 + 2] = network.driftVectors[a3 + 2];
+            pktStartDrift[v3] = network.wireframeDriftVectors[a3];
+            pktStartDrift[v3 + 1] = network.wireframeDriftVectors[a3 + 1];
+            pktStartDrift[v3 + 2] = network.wireframeDriftVectors[a3 + 2];
 
-            pktEndDrift[v3] = network.driftVectors[b3];
-            pktEndDrift[v3 + 1] = network.driftVectors[b3 + 1];
-            pktEndDrift[v3 + 2] = network.driftVectors[b3 + 2];
+            pktEndDrift[v3] = network.wireframeDriftVectors[b3];
+            pktEndDrift[v3 + 1] = network.wireframeDriftVectors[b3 + 1];
+            pktEndDrift[v3 + 2] = network.wireframeDriftVectors[b3 + 2];
 
-            pktPhases[v2] = network.phases[nodeA];
-            pktPhases[v2 + 1] = network.phases[nodeB];
+            pktPhases[v2] = network.wireframePhases[nodeA];
+            pktPhases[v2 + 1] = network.wireframePhases[nodeB];
 
             pktMeta[v3] = h;
             pktMeta[v3 + 1] = trailFrac;
@@ -710,6 +1089,8 @@ export function DeltaScene({
           uniform float uViewportHeight;
           uniform float uMaxNodePointSizePx;
           uniform float uMorphDim;
+          uniform float uShieldVisualScale;
+          uniform float uHeroSizeTrim;
 
           varying float vPacketAlpha;
 
@@ -741,8 +1122,9 @@ export function DeltaScene({
 
             float dist = max(1.4, -mvPosition.z);
             float sizeFalloff = mix(1.0, 0.48, trailFrac);
-            float rawPktSize = (uPacketSize * uThemePointSizeScale * sizeFalloff * uViewportHeight * 0.55 * uPixelRatio) / dist;
-            gl_PointSize = clamp(rawPktSize, 1.5 * uPixelRatio, uMaxNodePointSizePx * uThemePointSizeScale * uPixelRatio);
+            float pktScale = uShieldVisualScale * uHeroSizeTrim;
+            float rawPktSize = (uPacketSize * pktScale * uThemePointSizeScale * sizeFalloff * uViewportHeight * 0.55 * uPixelRatio) / dist;
+            gl_PointSize = clamp(rawPktSize, 1.5 * uPixelRatio, uMaxNodePointSizePx * pktScale * uThemePointSizeScale * uPixelRatio);
 
             vPacketAlpha = (1.0 - trailFrac * 0.82) * uIdleScale * uMorphDim;
           }
@@ -775,6 +1157,278 @@ export function DeltaScene({
       packetPoints.frustumCulled = false;
       packetPoints.visible = profile.idleMotion;
       deltaGroup.add(packetPoints);
+
+      // --- C2. TRAVELLING SYMBOL EDGE PACKETS (fade out over 250ms, pause while faded, switch on settle) ---
+      const symPktTotalVerts = symbolPacketCount * hopsPerLoop * trailSamplesPerPacket;
+      const symPktStartPos = new Float32Array(symPktTotalVerts * 3);
+      const symPktEndPos = new Float32Array(symPktTotalVerts * 3);
+      const symPktStartDrift = new Float32Array(symPktTotalVerts * 3);
+      const symPktEndDrift = new Float32Array(symPktTotalVerts * 3);
+      const symPktPhases = new Float32Array(symPktTotalVerts * 2);
+      const symPktMeta = new Float32Array(symPktTotalVerts * 3);
+
+      const symPktStartPosAttr = new THREE.BufferAttribute(symPktStartPos, 3);
+      symPktStartPosAttr.setUsage(THREE.DynamicDrawUsage);
+      const symPktEndPosAttr = new THREE.BufferAttribute(symPktEndPos, 3);
+      symPktEndPosAttr.setUsage(THREE.DynamicDrawUsage);
+      const symPktStartDriftAttr = new THREE.BufferAttribute(symPktStartDrift, 3);
+      symPktStartDriftAttr.setUsage(THREE.DynamicDrawUsage);
+      const symPktEndDriftAttr = new THREE.BufferAttribute(symPktEndDrift, 3);
+      symPktEndDriftAttr.setUsage(THREE.DynamicDrawUsage);
+      const symPktPhasesAttr = new THREE.BufferAttribute(symPktPhases, 2);
+      symPktPhasesAttr.setUsage(THREE.DynamicDrawUsage);
+      const symPktMetaAttr = new THREE.BufferAttribute(symPktMeta, 3);
+      symPktMetaAttr.setUsage(THREE.DynamicDrawUsage);
+
+      const symbolPacketGeometry = new THREE.BufferGeometry();
+      symbolPacketGeometry.setAttribute('position', symPktStartPosAttr);
+      symbolPacketGeometry.setAttribute('aEndPos', symPktEndPosAttr);
+      symbolPacketGeometry.setAttribute('aDrift', symPktStartDriftAttr);
+      symbolPacketGeometry.setAttribute('aEndDrift', symPktEndDriftAttr);
+      symbolPacketGeometry.setAttribute('aPhases', symPktPhasesAttr);
+      symbolPacketGeometry.setAttribute('aPacketMeta', symPktMetaAttr);
+
+      let currentSymPacketLoops: PacketEdgeLoop[] = [];
+      const symbolPacketSeeds: Record<ShieldSymbolName, number> = {
+        term: 2111,
+        hat: 2221,
+        code: 2333,
+      };
+
+      const rebuildSymbolPackets = (sym: ShieldSymbolName) => {
+        currentSymPacketLoops = buildPacketEdgeLoops(
+          network.symbolPacketEdges[sym],
+          symNodeTotal,
+          symbolPacketCount,
+          hopsPerLoop,
+          symbolPacketSeeds[sym],
+        );
+        let cursor = 0;
+        for (let pIdx = 0; pIdx < currentSymPacketLoops.length; pIdx++) {
+          const loop = currentSymPacketLoops[pIdx];
+          for (let h = 0; h < hopsPerLoop; h++) {
+            const nodeA = loop.hopNodePairs[h * 2];
+            const nodeB = loop.hopNodePairs[h * 2 + 1];
+            const a3 = nodeA * 3;
+            const b3 = nodeB * 3;
+
+            for (let tSample = 0; tSample < trailSamplesPerPacket; tSample++) {
+              const v3 = cursor * 3;
+              const v2 = cursor * 2;
+              const trailFrac = tSample / Math.max(1, trailSamplesPerPacket - 1);
+
+              symPktStartPos[v3] = symbolCurPos[a3];
+              symPktStartPos[v3 + 1] = symbolCurPos[a3 + 1];
+              symPktStartPos[v3 + 2] = symbolCurPos[a3 + 2];
+
+              symPktEndPos[v3] = symbolCurPos[b3];
+              symPktEndPos[v3 + 1] = symbolCurPos[b3 + 1];
+              symPktEndPos[v3 + 2] = symbolCurPos[b3 + 2];
+
+              symPktStartDrift[v3] = network.symbolNodeDriftVectors[a3];
+              symPktStartDrift[v3 + 1] = network.symbolNodeDriftVectors[a3 + 1];
+              symPktStartDrift[v3 + 2] = network.symbolNodeDriftVectors[a3 + 2];
+
+              symPktEndDrift[v3] = network.symbolNodeDriftVectors[b3];
+              symPktEndDrift[v3 + 1] = network.symbolNodeDriftVectors[b3 + 1];
+              symPktEndDrift[v3 + 2] = network.symbolNodeDriftVectors[b3 + 2];
+
+              symPktPhases[v2] = network.symbolNodePhases[nodeA];
+              symPktPhases[v2 + 1] = network.symbolNodePhases[nodeB];
+
+              symPktMeta[v3] = h;
+              symPktMeta[v3 + 1] = trailFrac;
+              symPktMeta[v3 + 2] = loop.staggerOffset;
+
+              cursor++;
+            }
+          }
+        }
+        symbolPacketGeometry.setDrawRange(0, cursor);
+        symPktStartPosAttr.needsUpdate = true;
+        symPktEndPosAttr.needsUpdate = true;
+        symPktStartDriftAttr.needsUpdate = true;
+        symPktEndDriftAttr.needsUpdate = true;
+        symPktPhasesAttr.needsUpdate = true;
+        symPktMetaAttr.needsUpdate = true;
+      };
+
+      const refreshSymbolPacketEndpoints = () => {
+        let cursor = 0;
+        for (let pIdx = 0; pIdx < currentSymPacketLoops.length; pIdx++) {
+          const loop = currentSymPacketLoops[pIdx];
+          for (let h = 0; h < hopsPerLoop; h++) {
+            const a3 = loop.hopNodePairs[h * 2] * 3;
+            const b3 = loop.hopNodePairs[h * 2 + 1] * 3;
+            const ax = symbolCurPos[a3];
+            const ay = symbolCurPos[a3 + 1];
+            const az = symbolCurPos[a3 + 2];
+            const bx = symbolCurPos[b3];
+            const by = symbolCurPos[b3 + 1];
+            const bz = symbolCurPos[b3 + 2];
+
+            for (let tSample = 0; tSample < trailSamplesPerPacket; tSample++) {
+              const v3 = cursor * 3;
+              symPktStartPos[v3] = ax;
+              symPktStartPos[v3 + 1] = ay;
+              symPktStartPos[v3 + 2] = az;
+              symPktEndPos[v3] = bx;
+              symPktEndPos[v3 + 1] = by;
+              symPktEndPos[v3 + 2] = bz;
+              cursor++;
+            }
+          }
+        }
+        symPktStartPosAttr.needsUpdate = true;
+        symPktEndPosAttr.needsUpdate = true;
+      };
+
+      rebuildSymbolPackets(startSymbol);
+
+      const symbolPacketMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          ...sharedUniforms,
+          uHopsPerLoop: { value: hopsPerLoop },
+          uPacketSpeed: { value: SITE_CONFIG.idle.packetSpeedHopsPerSec },
+          uPacketTailLen: { value: SITE_CONFIG.idle.packetTailLength },
+          uPacketSize: { value: SITE_CONFIG.idle.packetSize },
+        },
+        vertexShader: /* glsl */ `
+          attribute vec3 aEndPos;
+          attribute vec3 aDrift;
+          attribute vec3 aEndDrift;
+          attribute vec2 aPhases;
+          attribute vec3 aPacketMeta;
+
+          uniform float uHopsPerLoop;
+          uniform float uPacketSpeed;
+          uniform float uPacketTailLen;
+          uniform float uPacketSize;
+          uniform float uThemePointSizeScale;
+          uniform float uPixelRatio;
+          uniform float uViewportHeight;
+          uniform float uMaxNodePointSizePx;
+          uniform float uMorphDim;
+          uniform float uShieldVisualScale;
+          uniform float uHeroSizeTrim;
+          uniform float uSymbolEdgeAlpha;
+          uniform float uSymbolPacketTime;
+
+          varying float vPacketAlpha;
+
+          ${SHARED_IDLE_SCROLL_GLSL}
+
+          void main() {
+            float hopIdx = aPacketMeta.x;
+            float trailFrac = aPacketMeta.y;
+            float stagger = aPacketMeta.z;
+
+            if (uSymbolEdgeAlpha < 0.005 || uIdleScale < 0.01) {
+              vPacketAlpha = 0.0;
+              gl_PointSize = 0.0;
+              gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+              return;
+            }
+
+            float rawLoopPos = uSymbolPacketTime * uPacketSpeed + stagger * uHopsPerLoop - trailFrac * uPacketTailLen;
+            float loopPos = mod(rawLoopPos, uHopsPerLoop);
+            float activeHop = floor(loopPos);
+
+            if (abs(hopIdx - activeHop) > 0.25) {
+              vPacketAlpha = 0.0;
+              gl_PointSize = 0.0;
+              gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+              return;
+            }
+
+            float edgeT = fract(loopPos);
+            vec3 startWorld = computeBlendedPosition(position, aDrift, aPhases.x);
+            vec3 endWorld = computeBlendedPosition(aEndPos, aEndDrift, aPhases.y);
+            vec3 packetWorld = mix(startWorld, endWorld, edgeT);
+
+            vec4 mvPosition = modelViewMatrix * vec4(packetWorld, 1.0);
+            gl_Position = projectionMatrix * mvPosition;
+
+            float dist = max(1.4, -mvPosition.z);
+            float sizeFalloff = mix(1.0, 0.48, trailFrac);
+            float pktScale = uShieldVisualScale * uHeroSizeTrim;
+            float rawPktSize = (uPacketSize * pktScale * uThemePointSizeScale * sizeFalloff * uViewportHeight * 0.55 * uPixelRatio) / dist;
+            gl_PointSize = clamp(rawPktSize, 1.5 * uPixelRatio, uMaxNodePointSizePx * pktScale * uThemePointSizeScale * uPixelRatio);
+
+            vPacketAlpha = (1.0 - trailFrac * 0.82) * uIdleScale * uMorphDim * uSymbolEdgeAlpha;
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          uniform vec3 uAccentColor;
+          uniform vec3 uPacketCoreColor;
+          varying float vPacketAlpha;
+
+          void main() {
+            if (vPacketAlpha < 0.01) discard;
+            vec2 cxy = 2.0 * gl_PointCoord - 1.0;
+            float r2 = dot(cxy, cxy);
+            if (r2 > 1.0) discard;
+
+            float core = smoothstep(0.45, 0.0, r2);
+            float halo = smoothstep(1.0, 0.2, r2);
+            vec3 pulseColor = mix(uAccentColor, uPacketCoreColor, core * 0.65);
+            gl_FragColor = vec4(pulseColor, halo * vPacketAlpha);
+          }
+        `,
+        transparent: true,
+        depthWrite: false,
+        blending: PALETTES[currentThemeMode].useNormalBlending
+          ? THREE.NormalBlending
+          : THREE.AdditiveBlending,
+      });
+
+      const symbolPacketPoints = new THREE.Points(symbolPacketGeometry, symbolPacketMaterial);
+      symbolPacketPoints.frustumCulled = false;
+      symbolPacketPoints.visible = profile.idleMotion;
+      deltaGroup.add(symbolPacketPoints);
+
+      const symbolRuntime: SymbolMorphRuntime = {
+        nodeTotalCount: symNodeTotal,
+        unitScale: network.unitScale,
+        curPos: symbolCurPos,
+        vel: symbolVel,
+        morphStartPos: symbolMorphStartPos,
+        interpTarget: symbolInterpTarget,
+        drifts: network.symbolNodeDriftVectors,
+        phases: network.symbolNodePhases,
+        targets: network.symbolTargetPositions,
+        packetEdges: network.symbolPacketEdges,
+        posAttr: symbolPosAttr,
+        edgePosBuf,
+        edgeDriftBuf,
+        edgePhaseBuf,
+        edgeAlphaBuf,
+        edgePosAttr,
+        edgeDriftAttr,
+        edgePhaseAttr,
+        edgeAlphaAttr,
+        packetLoops: currentSymPacketLoops,
+        pktStartPos: symPktStartPos,
+        pktEndPos: symPktEndPos,
+        pktStartDrift: symPktStartDrift,
+        pktEndDrift: symPktEndDrift,
+        pktPhases: symPktPhases,
+        pktMeta: symPktMeta,
+        pktStartPosAttr: symPktStartPosAttr,
+        pktEndPosAttr: symPktEndPosAttr,
+        pktStartDriftAttr: symPktStartDriftAttr,
+        pktEndDriftAttr: symPktEndDriftAttr,
+        pktPhasesAttr: symPktPhasesAttr,
+        pktMetaAttr: symPktMetaAttr,
+        symbolPacketCount,
+        hopsPerLoop,
+        trailSamplesPerPacket,
+        isSettled: true,
+        lastTargetSymbol: startSymbol,
+        syncEdgeBuffer,
+        rebuildPackets: rebuildSymbolPackets,
+        refreshPacketEndpoints: refreshSymbolPacketEndpoints,
+      };
 
       // --- D. SPARSE AMBIENT DEPTH FIELD FOR SECTIONS 2–6 (Capped size & alpha) ---
       const ambientData = generateAmbientDepthField(
@@ -1046,27 +1700,44 @@ export function DeltaScene({
         pointsGeometry,
         pointsMaterial,
         pointsMesh,
+        symbolPointsGeometry,
+        symbolPointsMesh,
         lineGeometry,
         lineMaterial,
         lineSegments,
+        symbolLineGeometry,
+        symbolLineMaterial,
+        symbolLineSegments,
         packetGeometry,
         packetMaterial,
         packetPoints,
+        symbolPacketGeometry,
+        symbolPacketMaterial,
+        symbolPacketPoints,
+        symbolRuntime,
         ambientGeometry,
         ambientMaterial,
         ambientPoints,
         morphPool,
         dispose: () => {
           deltaGroup.remove(pointsMesh);
+          deltaGroup.remove(symbolPointsMesh);
           deltaGroup.remove(lineSegments);
+          deltaGroup.remove(symbolLineSegments);
           deltaGroup.remove(packetPoints);
+          deltaGroup.remove(symbolPacketPoints);
           scene.remove(ambientPoints);
           pointsGeometry.dispose();
           pointsMaterial.dispose();
+          symbolPointsGeometry.dispose();
           lineGeometry.dispose();
           lineMaterial.dispose();
+          symbolLineGeometry.dispose();
+          symbolLineMaterial.dispose();
           packetGeometry.dispose();
           packetMaterial.dispose();
+          symbolPacketGeometry.dispose();
+          symbolPacketMaterial.dispose();
           ambientGeometry.dispose();
           ambientMaterial.dispose();
           if (morphPool) {
@@ -1230,9 +1901,11 @@ export function DeltaScene({
     let isLoopRunning = false;
     let lastTimestamp = performance.now();
     let elapsedSec = 0;
+    let symbolPacketElapsedSec = 0;
 
     // Adaptive FPS downgrade state (first 2s window + optional second 2s window)
     let downgradeChecksCompleted = 0;
+    let heroFillTrimApplied = false;
     let windowFrames = 0;
     let windowElapsedSec = 0;
 
@@ -1277,6 +1950,13 @@ export function DeltaScene({
             toPalette.nodeBaseRgb[2],
           ]
         : lerpRgbTuple(fromPalette.nodeBaseRgb, toPalette.nodeBaseRgb, t);
+      const mutedNode: [number, number, number] = snappedToEnd
+        ? [
+            toPalette.mutedNodeRgb[0],
+            toPalette.mutedNodeRgb[1],
+            toPalette.mutedNodeRgb[2],
+          ]
+        : lerpRgbTuple(fromPalette.mutedNodeRgb, toPalette.mutedNodeRgb, t);
       const ambBase: [number, number, number] = snappedToEnd
         ? [
             toPalette.ambientBaseRgb[0],
@@ -1313,6 +1993,11 @@ export function DeltaScene({
         nodeBase[0],
         nodeBase[1],
         nodeBase[2],
+      );
+      sharedUniforms.uShieldNodeColor.value.set(
+        mutedNode[0],
+        mutedNode[1],
+        mutedNode[2],
       );
       sharedUniforms.uAmbientBaseColor.value.set(
         ambBase[0],
@@ -1362,10 +2047,30 @@ export function DeltaScene({
     };
 
     const syncContainerDataAttrs = () => {
+      const cycle = symbolCycleRef.current;
+      const activeSym =
+        SITE_CONFIG.shield.SYMBOL_ORDER[cycle.currentIndex] ?? cycle.edgeSymbol;
+      const phaseLabel: 'HOLD' | 'MORPH' | 'STATIC' = cycle.isStatic
+        ? 'STATIC'
+        : cycle.phase;
+
       container.setAttribute('data-morph-state', currentMorphState);
       container.setAttribute(
         'data-morph-particles',
         String(getActiveMorphParticleCount()),
+      );
+      container.setAttribute('data-shield-symbol', activeSym);
+      container.setAttribute('data-shield-symbol-phase', phaseLabel);
+      container.setAttribute('data-shield-symbol-edge', cycle.edgeSymbol);
+      container.setAttribute(
+        'data-shield-symbol-edge-alpha',
+        cycle.edgeAlpha.toFixed(2),
+      );
+      container.setAttribute(
+        'data-shield-symbol-next-sec',
+        cycle.secondsUntilNext === null
+          ? 'static'
+          : cycle.secondsUntilNext.toFixed(1),
       );
       container.setAttribute('data-scene-theme', currentThemeMode);
       container.setAttribute(
@@ -1389,6 +2094,11 @@ export function DeltaScene({
         clearColorHex: PALETTES[currentThemeMode].clearColorHex,
         clearRgb: PALETTES[currentThemeMode].clearRgb,
         nodeBaseRgb: [ivoryRgb[0], ivoryRgb[1], ivoryRgb[2]],
+        mutedNodeRgb: [
+          sharedUniforms.uShieldNodeColor.value.x,
+          sharedUniforms.uShieldNodeColor.value.y,
+          sharedUniforms.uShieldNodeColor.value.z,
+        ],
         ambientBaseRgb: [
           sharedUniforms.uAmbientBaseColor.value.x,
           sharedUniforms.uAmbientBaseColor.value.y,
@@ -1413,10 +2123,12 @@ export function DeltaScene({
       currentThemeMode = nextTheme;
       toPalette = PALETTES[nextTheme];
 
-      // Switch packet blending between AdditiveBlending (dark) and NormalBlending (light) without rebuilding material
-      activeMeshes.packetMaterial.blending = toPalette.useNormalBlending
+      // Switch packet blending between AdditiveBlending (dark) and NormalBlending (light) without rebuilding materials
+      const nextBlending = toPalette.useNormalBlending
         ? THREE.NormalBlending
         : THREE.AdditiveBlending;
+      activeMeshes.packetMaterial.blending = nextBlending;
+      activeMeshes.symbolPacketMaterial.blending = nextBlending;
 
       syncContainerDataAttrs();
 
@@ -1432,6 +2144,9 @@ export function DeltaScene({
     const emitDebugStats = (fpsVal: number) => {
       syncContainerDataAttrs();
       if (debugCallbackRef.current) {
+        const cycle = symbolCycleRef.current;
+        const activeSym =
+          SITE_CONFIG.shield.SYMBOL_ORDER[cycle.currentIndex] ?? cycle.edgeSymbol;
         debugCallbackRef.current({
           tier: currentProfile.tier,
           fps: Math.round(fpsVal),
@@ -1443,6 +2158,9 @@ export function DeltaScene({
           morphState: currentMorphState,
           morphParticleCount: getActiveMorphParticleCount(),
           clearAlpha: renderer.getClearAlpha(),
+          shieldSymbol: activeSym,
+          shieldSymbolNextSec: cycle.secondsUntilNext,
+          shieldSymbolPhase: cycle.isStatic ? 'STATIC' : cycle.phase,
         });
       }
     };
@@ -1486,23 +2204,28 @@ export function DeltaScene({
         activeMeshes = buildTierMeshes(currentProfile);
       }
 
-      if (width < 768) {
-        // Mobile (<768px): title is top-aligned, lattice sits cleanly in the lower half
-        deltaGroup.position.set(0, -1.12, 0);
-        deltaGroup.scale.setScalar(0.48);
-      } else if (width < 1024) {
-        // Tablet / compact desktop (768px–1023px): keep lattice strictly in the right half
-        deltaGroup.position.set(1.88, -0.05, 0);
-        deltaGroup.scale.setScalar(0.60);
-      } else if (width < 1280) {
-        // Medium desktop (1024px–1279px)
-        deltaGroup.position.set(2.18, 0.02, 0);
-        deltaGroup.scale.setScalar(0.76);
-      } else {
-        // Wide desktop (>=1280px)
-        deltaGroup.position.set(2.38, 0.05, 0);
-        deltaGroup.scale.setScalar(0.90);
-      }
+      const clearanceBounds = measureHeroClearanceBounds();
+      const shieldPlacement = computeHeroShieldPlacement({
+        viewportWidth: width,
+        viewportHeight: height,
+        fovDeg: camera.fov,
+        cameraZ: SITE_CONFIG.scroll.cameraStartZ,
+        nameRect: clearanceBounds.nameRect,
+        opaqueContainerRect: clearanceBounds.opaqueContainerRect,
+        navBottomPx: clearanceBounds.navBottomPx,
+        heroBottomLineTopPx: clearanceBounds.heroBottomLineTopPx,
+      });
+
+      deltaGroup.position.set(shieldPlacement.anchorX, shieldPlacement.anchorY, 0);
+      deltaGroup.scale.setScalar(shieldPlacement.scale);
+      container.setAttribute(
+        'data-shield-height-px',
+        String(Math.round(shieldPlacement.finalHeightPx)),
+      );
+      container.setAttribute(
+        'data-shield-scale',
+        shieldPlacement.scale.toFixed(3),
+      );
 
       if (activeMeshes.morphPool) {
         evaluateReadabilityAndOpacityCap(activeMeshes.morphPool, currentMorphState);
@@ -1511,6 +2234,15 @@ export function DeltaScene({
       emitDebugStats(currentMeasuredFps);
     };
     updateLayoutPlacement(true);
+
+    // Re-measure once web fonts finish loading so hero name clearance uses final glyph metrics
+    if (typeof document !== 'undefined' && document.fonts?.ready) {
+      void document.fonts.ready.then(() => {
+        if (!isDisposed) {
+          updateLayoutPlacement(true);
+        }
+      });
+    }
 
     // Debounce resize handling (~150ms)
     let resizeTimeoutId = 0;
@@ -1576,22 +2308,35 @@ export function DeltaScene({
           debugElapsedSec = 0;
         }
 
-        // Adaptive downgrade check over each 2-second sampling window (up to 2 checks)
+        // Adaptive FPS check over each 2-second sampling window:
+        // On desktop high tier, if FPS falls below 55 fps from larger fill area, trim hero node size/alpha
+        // before reducing node count via quality tier downgrade.
         if (
           downgradeChecksCompleted < SITE_CONFIG.qualityTiers.maxDowngradeChecks &&
           windowElapsedSec >= SITE_CONFIG.qualityTiers.sampleWindowSec
         ) {
           const avgFps = windowFrames / windowElapsedSec;
-          downgradeChecksCompleted += 1;
           windowFrames = 0;
           windowElapsedSec = 0;
 
           if (
-            avgFps < SITE_CONFIG.qualityTiers.fpsDowngradeThreshold &&
-            currentProfile.tier !== 'low'
+            !heroFillTrimApplied &&
+            !currentProfile.isMobile &&
+            currentProfile.tier === 'high' &&
+            avgFps < SITE_CONFIG.shield.highTierFpsTrimThreshold
           ) {
-            const nextTier = downgradeQualityTier(currentProfile.tier);
-            applyTierDowngrade(nextTier);
+            heroFillTrimApplied = true;
+            sharedUniforms.uHeroSizeTrim.value = 0.85;
+            sharedUniforms.uHeroAlphaTrim.value = 0.88;
+          } else {
+            downgradeChecksCompleted += 1;
+            if (
+              avgFps < SITE_CONFIG.qualityTiers.fpsDowngradeThreshold &&
+              currentProfile.tier !== 'low'
+            ) {
+              const nextTier = downgradeQualityTier(currentProfile.tier);
+              applyTierDowngrade(nextTier);
+            }
           }
         }
       }
@@ -1781,6 +2526,128 @@ export function DeltaScene({
         pool.topoEdgeLines.visible = false;
       }
 
+      // --- HERO SHIELD INTERIOR SYMBOL CYCLE & MORPH (48 nodes x 3 z-layers) ---
+      const cycle = symbolCycleRef.current;
+      const symRt = activeMeshes.symbolRuntime;
+      const disableSymbolCycle = shouldDisableSymbolCycle({
+        plainView: false,
+        prefersReducedMotion: reducedMotionRef.current,
+        qualityTier: currentProfile.tier,
+        saveData,
+      });
+      const staticSymbol = resolveStaticShieldSymbol({
+        plainView: false,
+        prefersReducedMotion: reducedMotionRef.current,
+        qualityTier: currentProfile.tier,
+        saveData,
+      });
+      // Pause whenever hero is not in its formed state (dispersed/scrolled away), tab hidden, or canvas invisible
+      const isHeroFormed = metrics.heroProgress <= 0.05 && currentMorphState === 'HERO';
+      const isCycleActive = isHeroFormed && !isTabHidden && isCanvasVisible;
+
+      const cycleRes = stepSymbolCycleState(cycle, {
+        dtMs: dt * 1000,
+        isActive: isCycleActive,
+        disableCycle: disableSymbolCycle,
+        staticSymbol,
+      });
+
+      if (disableSymbolCycle) {
+        const dest = symRt.targets[staticSymbol];
+        if (cycleRes.switchedEdgeSymbol || !symRt.isSettled) {
+          symRt.curPos.set(dest);
+          symRt.vel.fill(0);
+          symRt.morphStartPos.set(dest);
+          symRt.interpTarget.set(dest);
+          symRt.posAttr.needsUpdate = true;
+          symRt.lastTargetSymbol = staticSymbol;
+          symRt.isSettled = true;
+          symRt.syncEdgeBuffer(staticSymbol);
+          symRt.rebuildPackets(staticSymbol);
+        }
+        sharedUniforms.uSymbolEdgeAlpha.value = 1.0;
+        activeMeshes.symbolLineSegments.visible = true;
+        activeMeshes.symbolPacketPoints.visible = currentProfile.idleMotion && !reducedMotionRef.current;
+        if (activeMeshes.symbolPacketPoints.visible) {
+          symbolPacketElapsedSec += dt;
+        }
+      } else {
+        const morphMs = Math.max(1, SITE_CONFIG.shield.SYMBOL_MORPH_MS);
+        const symbolSpringOmega = 16.0 / (morphMs / 1000);
+
+        // Retarget smoothly from current positions (preserving velocity, never snapping)
+        if (cycleRes.startedMorph || cycleRes.targetSymbol !== symRt.lastTargetSymbol) {
+          symRt.morphStartPos.set(symRt.curPos);
+          symRt.lastTargetSymbol = cycleRes.targetSymbol;
+          symRt.isSettled = false;
+        }
+
+        let symbolMovedThisFrame = false;
+
+        if (isCycleActive && cycle.phase === 'MORPH') {
+          const dest = symRt.targets[cycleRes.targetSymbol];
+          const rampMs = morphMs * 0.80;
+          const eased = easeInOutCubic(Math.min(1, cycle.phaseElapsedMs / Math.max(1, rampMs)));
+          const invEased = 1 - eased;
+          const len = symRt.curPos.length;
+          for (let i = 0; i < len; i++) {
+            symRt.interpTarget[i] = symRt.morphStartPos[i] * invEased + dest[i] * eased;
+          }
+          stepCriticallyDampedSpringBuffer(
+            symRt.curPos,
+            symRt.vel,
+            symRt.interpTarget,
+            dt,
+            symbolSpringOmega,
+          );
+          symRt.posAttr.needsUpdate = true;
+          symRt.isSettled = false;
+          symbolMovedThisFrame = true;
+        } else if (isCycleActive && !symRt.isSettled) {
+          // Finish final tiny settling after morph completes while new symbol edges fade in
+          const dest = symRt.targets[cycle.edgeSymbol];
+          const maxDistSq = stepCriticallyDampedSpringBuffer(
+            symRt.curPos,
+            symRt.vel,
+            dest,
+            dt,
+            symbolSpringOmega,
+          );
+          symRt.posAttr.needsUpdate = true;
+          symbolMovedThisFrame = true;
+          if (maxDistSq < 1e-8) {
+            symRt.curPos.set(dest);
+            symRt.vel.fill(0);
+            symRt.posAttr.needsUpdate = true;
+            symRt.isSettled = true;
+          }
+        }
+
+        if (cycleRes.switchedEdgeSymbol) {
+          symRt.syncEdgeBuffer(cycle.edgeSymbol);
+          symRt.rebuildPackets(cycle.edgeSymbol);
+        } else if (symbolMovedThisFrame && cycle.edgeAlpha > 0.001) {
+          // Keep fading-out / fading-in edges and packets anchored to the moving nodes
+          symRt.syncEdgeBuffer(cycle.edgeSymbol);
+          symRt.refreshPacketEndpoints();
+        }
+
+        sharedUniforms.uSymbolEdgeAlpha.value = cycle.edgeAlpha;
+        const symbolEdgesVisible = cycle.edgeAlpha > 0.004;
+        activeMeshes.symbolLineSegments.visible = symbolEdgesVisible;
+        activeMeshes.symbolPacketPoints.visible =
+          symbolEdgesVisible && currentProfile.idleMotion && !reducedMotionRef.current;
+
+        // Advance symbol packet clock only while symbol edges are visible (never spawn while faded out)
+        if (activeMeshes.symbolPacketPoints.visible && isHeroFormed) {
+          symbolPacketElapsedSec += dt;
+        }
+      }
+
+      if (cycleRes.symbolChanged) {
+        emitDebugStats(currentMeasuredFps);
+      }
+
       // Dim background ambient/dispersed particles when morph pool has regrouped into a shape
       const morphEngagement =
         activeEffectiveMaxOpacity > 0
@@ -1790,6 +2657,7 @@ export function DeltaScene({
 
       // Update GPU uniforms directly without extra scene damping
       sharedUniforms.uTime.value = elapsedSec;
+      sharedUniforms.uSymbolPacketTime.value = symbolPacketElapsedSec;
       sharedUniforms.uScrollProgress.value = metrics.heroProgress;
       sharedUniforms.uIdleScale.value = currentProfile.idleMotion
         ? computeIdleMotionScale(metrics.heroProgress, reducedMotionRef.current)

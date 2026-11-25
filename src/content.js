@@ -36,14 +36,10 @@
  *  6. projectsAndCtfs.built[2] ("Decentralized Maritime Communication Network").status ("")
  *     -> TODO: confirm status & whether project should be shown
  *  7. writeups.entries[0] ("mr-robot").date ("")
- *     -> TODO: add completion date for Mr Robot CTF
- *  8. writeups.entries[0] ("mr-robot").sections (goal, setup, reconnaissance,
- *     enumeration, foothold, privilegeEscalation, whatIGotWrong,
- *     defendersView, takeaways)
- *     -> TODO: my own notes (currently empty; published: false by default)
+ *     -> TODO: add completion date for Mr Robot CTF (optional)
  *
  * B. UNPUBLISHED WRITE-UPS (`published: false` — hidden from published list):
- *  1. writeups.entries[0] ("mr-robot" — "Mr Robot CTF") (published: false)
+ *  (none currently — "mr-robot" is published with notes from GitHub)
  *
  * C. UNCONFIRMED ITEMS (`confirmed: false` — NEVER rendered on the live page):
  *  1. skills.groups["Recon and scanning"] -> "Wireshark" (confirmed: false — TODO: confirm, "Wireshark basics" appears in Pre Security)
@@ -359,77 +355,147 @@ export const PORTFOLIO_CONTENT = {
     entries: [
       {
         slug: 'mr-robot',
-        published: false,
+        published: true,
         title: 'Mr Robot CTF',
         platform: 'TryHackMe',
         type: 'guided-lab',
         status: 'completed, 3 of 3 flags',
         // TODO: add completion date
         date: '',
-        tags: ['Enumeration', 'WordPress', 'Linux PrivEsc', 'SUID'],
+        tags: ['Enumeration', 'WordPress', 'Hash Cracking', 'Linux PrivEsc', 'SUID'],
         roomUrl: 'https://tryhackme.com/r/room/mrrobot',
+        githubUrl:
+          'https://github.com/Vaibhav-48-iiit/ctf-writeups/tree/main/mr-robot-ctf',
         summary: SITE_CONFIG.writeupsConfig.mrRobotDefaultSummary,
         sections: {
           goal: {
-            // TODO: my own notes
-            paragraphs: [],
-            steps: [],
+            paragraphs: [
+              'Mr Robot is a Linux-based Capture The Flag (CTF) room on TryHackMe, inspired by the television series Mr. Robot. The objective is to compromise a vulnerable machine, discover three hidden keys, and ultimately obtain root access.',
+              'The challenge focuses on practical penetration-testing techniques, including network reconnaissance, web enumeration, WordPress exploitation, password hash cracking, Linux user enumeration, and privilege escalation.',
+            ],
+            steps: [
+              'Understand how to identify exposed network services.',
+              'Discover hidden directories and sensitive information on a web server.',
+              'Understand WordPress authentication and exploitation.',
+              'Gain initial access through an authenticated web application.',
+              'Identify and crack password hashes.',
+              'Understand Linux file permissions and SUID binaries.',
+              'Escalate privileges from a low-privileged user to root.',
+            ],
             codeBlocks: [],
             screenshots: [],
           },
           setup: {
-            // TODO: my own notes
-            paragraphs: [],
-            steps: [],
+            paragraphs: [
+              'The assessment was performed in an authorized TryHackMe lab environment. The target machine was accessed through its assigned lab IP address, and all testing activities were restricted to the authorized CTF environment.',
+            ],
+            steps: [
+              'Attacker machine: Kali Linux',
+              'Target machine: TryHackMe Mr Robot',
+              'Network access: TryHackMe VPN connection',
+              'Network scanning: Nmap',
+              'Web enumeration: Gobuster, cURL',
+              'Web application: WordPress',
+              'Shell interaction: Netcat',
+              'Hash analysis: Hashcat / hash-cracking utilities',
+              'Privilege escalation: Linux SUID enumeration and Nmap',
+            ],
             codeBlocks: [],
             screenshots: [],
           },
           reconnaissance: {
-            // TODO: my own notes
-            paragraphs: [],
-            steps: [],
+            paragraphs: [
+              'The assessment started with network reconnaissance to identify the target’s exposed services and understand its attack surface. Nmap was used to scan the target and identify accessible ports.',
+              'The scan revealed web services running over HTTP and HTTPS, indicating that the web application was the primary entry point for further investigation. Instead of immediately attempting exploitation, the focus shifted towards understanding the services and inspecting the web interface in a browser.',
+            ],
+            steps: [
+              'A web server was accessible over HTTP and HTTPS.',
+              'The website contained a custom interface inspired by the Mr. Robot series.',
+              'The web server became the primary target for further enumeration.',
+            ],
             codeBlocks: [],
             screenshots: [],
           },
           enumeration: {
-            // TODO: my own notes
-            paragraphs: [],
-            steps: [],
+            paragraphs: [
+              'After identifying the web services, directory enumeration was performed using Gobuster to discover hidden directories, files, and potentially sensitive information not directly accessible through the homepage.',
+              'Inspecting robots.txt revealed references to a custom dictionary file and a hidden key file (key values [redacted]). The discovered dictionary appeared relevant to the authentication mechanism and was retained for further investigation.',
+              'Another discovery was the /license resource, which contained an encoded string. Using cURL and Base64 decoding techniques, the encoded content was examined and identified as credential-related information ([redacted]).',
+            ],
+            steps: [
+              'Hidden resources were discovered through directory enumeration.',
+              'robots.txt exposed useful information about files hosted on the server.',
+              'A custom dictionary was identified for potential password testing.',
+              'The /license resource contained Base64-encoded information.',
+              'WordPress was identified as the underlying content management system.',
+            ],
             codeBlocks: [],
             screenshots: [],
           },
           foothold: {
-            // TODO: my own notes
-            paragraphs: [],
+            paragraphs: [
+              'Using the information collected during enumeration, the WordPress login interface became the focus of the next stage and helped establish access to the WordPress administrative interface.',
+              'Inside the dashboard, the WordPress Theme Editor allowed modification of PHP theme files, creating an authenticated remote code execution path. A PHP reverse-shell approach connected back to the attacking machine through a Netcat listener, providing a low-privileged shell for local enumeration.',
+              'Examining home directories and accessible files uncovered an MD5 password hash associated with another local user account ([redacted]). A wordlist-based cracking approach recovered the password, allowing a switch to that local user account to continue locating the next hidden key.',
+            ],
             steps: [],
             codeBlocks: [],
             screenshots: [],
           },
           privilegeEscalation: {
-            // TODO: my own notes
-            paragraphs: [],
+            paragraphs: [
+              'This was the most educational stage of the entire CTF. Initially, I did not know about SUID-based privilege escalation or how specially permissioned Linux binaries could be abused to obtain higher privileges.',
+              'While investigating Linux permissions and SUID-enabled files, I learned that SUID (Set User ID) allows an executable to run with the effective privileges of its file owner rather than the executing user. Enumeration revealed an Nmap binary with SUID permissions whose installed version supported an interactive mode allowing shell command execution, creating a path to root-level access.',
+              'Important learning experience: I had not previously studied or practically performed SUID-based privilege escalation and learned the concept during this CTF with AI assistance for understanding the permission mechanism, commands, and scripts. The overall attack logic, reasoning behind each stage, interpretation of findings, and investigation decisions were my own.',
+            ],
             steps: [],
             codeBlocks: [],
             screenshots: [],
           },
           whatIGotWrong: {
-            // TODO: my own notes
-            paragraphs: [],
-            steps: [],
+            paragraphs: [
+              'If I attempted this CTF again, I would make several improvements across methodology, documentation, and independent troubleshooting.',
+              'Overall, this CTF helped connect individual cybersecurity concepts into one practical penetration-testing workflow: understanding how reconnaissance, enumeration, exploitation, hash cracking, and privilege escalation work together during a real-world security assessment.',
+            ],
+            steps: [
+              'More structured reconnaissance: perform a complete port and service enumeration before focusing on individual services.',
+              'Better enumeration documentation: maintain a clear record of discovered directories, files, services, and potentially useful information.',
+              'Understand tools before executing commands: spend more time understanding the options and purpose of each command.',
+              'Improve Linux privilege-escalation knowledge: study SUID, SGID, Linux capabilities, cron jobs, sudo misconfigurations, and file-permission weaknesses beforehand.',
+              'Improve shell handling: learn more about reverse-shell stabilization, interactive terminals, and troubleshooting network connectivity.',
+              'Reduce dependency on AI: attempt to understand the problem independently first, then use AI to clarify unfamiliar concepts and verify approaches.',
+              'Document findings throughout the assessment: record methodology, reasoning, mistakes, and lessons learned at every stage rather than only after completion.',
+            ],
             codeBlocks: [],
             screenshots: [],
           },
           defendersView: {
-            // TODO: my own notes
-            paragraphs: [],
-            steps: [],
+            paragraphs: [
+              'The vulnerabilities demonstrated in this challenge highlight several security weaknesses and defensive opportunities across network exposure, web hardening, authentication, password storage, Linux permissions, and monitoring.',
+            ],
+            steps: [
+              'Network exposure: disable unnecessary services, restrict access to administrative interfaces, apply strict firewall rules, and regularly audit exposed ports.',
+              'Web application security: avoid exposing sensitive files in public directories, review robots.txt for unintended disclosure, keep WordPress/themes/plugins updated, and disable Theme Editor file editing.',
+              'Authentication security: enforce strong passwords, implement rate limiting and account lockout, require MFA for admin accounts, and avoid username enumeration in error messages.',
+              'Password storage: avoid weak hashing algorithms like plain MD5; use Argon2id or bcrypt with proper salting and work factors.',
+              'Linux privilege management: regularly audit SUID/SGID binaries, remove unnecessary SUID bits, and never grant elevated permissions to utilities with shell-escape capabilities.',
+              'Detection opportunities: monitor unusual WordPress theme modifications, unexpected outbound reverse-shell traffic, repeated authentication failures, unusual SUID binary executions, and unexpected root-shell creation.',
+            ],
             codeBlocks: [],
             screenshots: [],
           },
           takeaways: {
-            // TODO: my own notes
             paragraphs: [],
-            steps: [],
+            steps: [
+              'Reconnaissance matters: understanding exposed services before attempting exploitation makes the assessment more structured.',
+              'Web enumeration can reveal sensitive information: files like robots.txt and public resources can expose paths and clues about the application.',
+              'WordPress security is important: administrative features that allow modifying PHP files become dangerous when improperly secured.',
+              'Reverse shells provide an initial foothold: understanding listeners, network connectivity, and shell interaction is essential during exploitation.',
+              'Weak password storage creates security risks: weak passwords and outdated hashing algorithms make credential recovery easier.',
+              'Linux permissions deserve attention: SUID, SGID, file ownership, and executable permissions are critical during Linux security assessments.',
+              'Privilege escalation requires enumeration: obtaining a low-privileged shell is only the start; the local environment must be thoroughly investigated.',
+              'AI can support practical learning: it can clarify unfamiliar concepts and scripts, but validating results and understanding the underlying logic remains essential.',
+            ],
             codeBlocks: [],
             screenshots: [],
           },

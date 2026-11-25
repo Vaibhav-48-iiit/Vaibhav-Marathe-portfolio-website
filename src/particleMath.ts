@@ -3,6 +3,8 @@ import {
   type MorphStateName,
   type QualityTierName,
   type SectionId,
+  type ShieldSymbolConfig,
+  type ShieldSymbolName,
 } from './config';
 
 export type { MorphStateName };
@@ -26,16 +28,66 @@ export interface QualityTierProfile {
 }
 
 export interface DeltaNetworkData {
-  /** Base XYZ positions of each node when fully formed into the Δ (length = count * 3) */
+  /** Base XYZ positions of each node particle when formed (length = count * 3) */
   basePositions: Float32Array;
-  /** Deterministic dispersion velocity/drift vectors for each node when scrolling (length = count * 3) */
+  /** Deterministic dispersion velocity/drift vectors for each particle on scroll (length = count * 3) */
   driftVectors: Float32Array;
-  /** Per-node phase offset in [0, 2π] for subtle depth turbulence during scroll */
+  /** Per-particle phase offset in [0, 2π] for subtle breathing & scroll turbulence */
   phases: Float32Array;
-  /** Per-node colour RGB values (mostly #E8E4DA with sparse #4FD1D9 cyan highlights) */
+  /** Per-particle colour RGB values (muted node colour for shield, accent colour for symbol) */
   nodeColors: Float32Array;
-  /** Pairs of node indices [i0, j0, i1, j1, ...] that are connected by thin lines in the Δ */
+  /** Per-particle flag: 0 = shield node, 1 = symbol node (length = count) */
+  nodeIsSymbol: Uint8Array;
+  /** Pairs of particle indices [i0, j0, i1, j1, ...] in [0, count - 1] along shield/symbol edges */
   edgeIndices: Uint16Array;
+  /** Active shield symbol name */
+  symbol: ShieldSymbolName;
+  /** Complete 3-layer wireframe node base positions (length = wireframeNodeCount * 3) */
+  wireframeBasePositions: Float32Array;
+  /** Complete 3-layer wireframe node drift vectors (length = wireframeNodeCount * 3) */
+  wireframeDriftVectors: Float32Array;
+  /** Complete 3-layer wireframe node phases (length = wireframeNodeCount) */
+  wireframePhases: Float32Array;
+  /** Pairs of wireframe node indices for thin low-alpha shield outlines, radial links, and z-layer struts */
+  wireframeShieldEdgeIndices: Uint16Array;
+  /** Per-edge alpha weight for each shield wireframe edge (length = wireframeShieldEdgeIndices.length / 2) */
+  wireframeShieldEdgeAlpha: Float32Array;
+  /** Shield-only wireframe edges (outer, inner, radial links, inter-layer shield struts) for continuous shield packets */
+  wireframeShieldPacketEdges: Uint16Array;
+  /** Ready-to-draw accent symbol line segments [ax,ay,az, bx,by,bz, ...] including thick parallel strokes */
+  wireframeSymbolSegments: Float32Array;
+  /** Matching endpoint drift vectors for symbol line segments */
+  wireframeSymbolDrifts: Float32Array;
+  /** Matching endpoint phases for symbol line segments (2 per segment) */
+  wireframeSymbolPhases: Float32Array;
+  /** Per-vertex alpha weights for symbol line segments (2 per segment) */
+  wireframeSymbolAlpha: Float32Array;
+  /** All wireframe edges (shield + symbol centerlines + z-struts) for travelling packets */
+  wireframePacketEdges: Uint16Array;
+  /** Shield-only dot positions (muted colour, static during symbol cycling) */
+  shieldOnlyPositions: Float32Array;
+  /** Shield-only dot drift vectors */
+  shieldOnlyDrifts: Float32Array;
+  /** Shield-only dot phases */
+  shieldOnlyPhases: Float32Array;
+  /** Number of symbol nodes per z-layer (48) */
+  symbolNodeCountPerLayer: number;
+  /** Number of z-layers (3) */
+  symbolLayerCount: number;
+  /** Total symbol nodes across all 3 z-layers (144) */
+  symbolNodeTotalCount: number;
+  /** Starting 3-layer XYZ positions of all 144 symbol nodes */
+  symbolNodeBasePositions: Float32Array;
+  /** Deterministic drift vectors for the 144 symbol nodes */
+  symbolNodeDriftVectors: Float32Array;
+  /** Deterministic phases for the 144 symbol nodes */
+  symbolNodePhases: Float32Array;
+  /** Precomputed 3-layer XYZ target positions (length = 144 * 3) for every symbol in shield local space */
+  symbolTargetPositions: Record<ShieldSymbolName, Float32Array>;
+  /** 3-layer symbol packet edges (indexed 0..143) for each symbol */
+  symbolPacketEdges: Record<ShieldSymbolName, Uint16Array>;
+  /** World units per 100x120 box unit */
+  unitScale: number;
 }
 
 export interface AmbientFieldData {
@@ -456,136 +508,778 @@ export function generateAmbientDepthField(
   return { positions, phases, colors };
 }
 
-/**
- * Generates the 3D Δ (Delta) node network and deterministic dispersion vectors.
- */
-export function generateDeltaNetwork(count: number, seed = 42): DeltaNetworkData {
-  const rand = createSeededRandom(seed);
-  const R = SITE_CONFIG.particles.deltaRadius;
-  const thickness = SITE_CONFIG.particles.deltaThickness;
+interface Layer2DNode {
+  x: number;
+  y: number;
+  kind: 'outer' | 'inner' | 'symbol';
+  /** Original corner index (0..13) if this node is one of the 14 primary outer/inner shield corners, else -1 */
+  cornerIndex: number;
+  /** Index along the outer/inner loop or symbol vertex list */
+  seqIndex: number;
+  /** Subdivision depth priority: 0 = primary corner/vertex, 1 = midpoint, 2 = finer subdivision */
+  subdivRank: number;
+}
 
-  // Equilateral Δ vertices in local structure space (centered near origin)
-  const vTop = { x: 0, y: R * 0.96 };
-  const vLeft = { x: -R * 0.866, y: -R * 0.54 };
-  const vRight = { x: R * 0.866, y: -R * 0.54 };
-  const vertices = [vTop, vLeft, vRight];
+/**
+ * Resolves the initial concrete symbol name (`"term" | "hat" | "code"`) from a `ShieldSymbolConfig`.
+ */
+export function resolveDefaultSymbolName(
+  config: ShieldSymbolConfig = SITE_CONFIG.shield.SHIELD_SYMBOL,
+): ShieldSymbolName {
+  if (config === 'cycle') {
+    return SITE_CONFIG.shield.SYMBOL_ORDER[0] ?? 'term';
+  }
+  return config;
+}
+
+/**
+ * Computes the shield's 100 x 120 coordinate box transform to local 3D world space.
+ */
+export function getShieldBoxTransform(): {
+  boxCenterX: number;
+  boxCenterY: number;
+  boxSpanY: number;
+  unitScale: number;
+} {
+  const cfg = SITE_CONFIG.shield;
+  const boxCenterX = cfg.boxWidth * 0.5;
+  let minBoxY = Infinity;
+  let maxBoxY = -Infinity;
+  for (let i = 0; i < cfg.outerOutline.length; i++) {
+    const by = cfg.outerOutline[i][1];
+    if (by < minBoxY) minBoxY = by;
+    if (by > maxBoxY) maxBoxY = by;
+  }
+  const boxCenterY = (minBoxY + maxBoxY) * 0.5;
+  const boxSpanY = Math.max(1, maxBoxY - minBoxY);
+  const unitScale = cfg.worldHeight / boxSpanY;
+  return { boxCenterX, boxCenterY, boxSpanY, unitScale };
+}
+
+/**
+ * Builds the 3-layer XYZ target position buffers (length = 3 * 48 * 3 = 432 floats each)
+ * for all three symbols ("term", "hat", "code") in the exact same 100 x 120 shield coordinate transform.
+ */
+export function buildShieldSymbolTargets(): Record<ShieldSymbolName, Float32Array> {
+  const cfg = SITE_CONFIG.shield;
+  const { boxCenterX, boxCenterY, unitScale } = getShieldBoxTransform();
+  const zFractions = cfg.zLayerFractions;
+  const layerCount = zFractions.length;
+
+  const buildFor = (sym: ShieldSymbolName): Float32Array => {
+    const nodes = cfg.symbols[sym].nodes;
+    const nPerLayer = nodes.length;
+    const out = new Float32Array(layerCount * nPerLayer * 3);
+    for (let layerIdx = 0; layerIdx < layerCount; layerIdx++) {
+      const zVal = zFractions[layerIdx] * cfg.worldHeight;
+      const layerOff = layerIdx * nPerLayer;
+      for (let i = 0; i < nPerLayer; i++) {
+        const [bx, by] = nodes[i];
+        const o3 = (layerOff + i) * 3;
+        out[o3] = (bx - boxCenterX) * unitScale;
+        out[o3 + 1] = (boxCenterY - by) * unitScale;
+        out[o3 + 2] = zVal;
+      }
+    }
+    return out;
+  };
+
+  return {
+    term: buildFor('term'),
+    hat: buildFor('hat'),
+    code: buildFor('code'),
+  };
+}
+
+/**
+ * Computes the maximum vertex count required by `writeSymbolSegmentsBuffer` across all 3 symbols,
+ * so a single fixed-size GPU `BufferGeometry` can be reused with zero reallocations.
+ */
+export function computeMaxSymbolSegmentVertices(): number {
+  const cfg = SITE_CONFIG.shield;
+  const layerCount = cfg.zLayerFractions.length;
+  let maxSegments = 0;
+  for (const sym of ['term', 'hat', 'code'] as const) {
+    const symCfg = cfg.symbols[sym];
+    const edgeCount = symCfg.edges.length;
+    const frontStrands = symCfg.thickStrokeOffsets.length;
+    const inPlaneSegments = edgeCount * (frontStrands + Math.max(0, layerCount - 1));
+    const zStrutSegments = symCfg.nodes.length * Math.max(0, layerCount - 1);
+    const total = inPlaneSegments + zStrutSegments;
+    if (total > maxSegments) maxSegments = total;
+  }
+  return maxSegments * 2;
+}
+
+/**
+ * Writes the active symbol's 3-layer line segments (front thick parallel strands, mid/back centerlines,
+ * and subtle inter-layer z-struts) directly from the current 144 symbol node positions into pre-allocated
+ * Float32Arrays. Returns the number of vertices written (2 per segment).
+ */
+export function writeSymbolSegmentsBuffer(options: {
+  symbol: ShieldSymbolName;
+  symbolPositions: Float32Array;
+  symbolDrifts: Float32Array;
+  symbolPhases: Float32Array;
+  unitScale: number;
+  outPositions: Float32Array;
+  outDrifts: Float32Array;
+  outPhases: Float32Array;
+  outAlphas: Float32Array;
+}): number {
+  const cfg = SITE_CONFIG.shield;
+  const symCfg = cfg.symbols[options.symbol];
+  const edges = symCfg.edges;
+  const nPerLayer = symCfg.nodes.length;
+  const layerCount = cfg.zLayerFractions.length;
+  const {
+    symbolPositions,
+    symbolDrifts,
+    symbolPhases,
+    unitScale,
+    outPositions,
+    outDrifts,
+    outPhases,
+    outAlphas,
+  } = options;
+
+  let vCursor = 0;
+  const pushSegment = (
+    idxA: number,
+    idxB: number,
+    alphaW: number,
+    offX = 0,
+    offY = 0,
+  ) => {
+    const a3 = idxA * 3;
+    const b3 = idxB * 3;
+    const o3A = vCursor * 3;
+    const o3B = (vCursor + 1) * 3;
+
+    outPositions[o3A] = symbolPositions[a3] + offX;
+    outPositions[o3A + 1] = symbolPositions[a3 + 1] + offY;
+    outPositions[o3A + 2] = symbolPositions[a3 + 2];
+    outPositions[o3B] = symbolPositions[b3] + offX;
+    outPositions[o3B + 1] = symbolPositions[b3 + 1] + offY;
+    outPositions[o3B + 2] = symbolPositions[b3 + 2];
+
+    outDrifts[o3A] = symbolDrifts[a3];
+    outDrifts[o3A + 1] = symbolDrifts[a3 + 1];
+    outDrifts[o3A + 2] = symbolDrifts[a3 + 2];
+    outDrifts[o3B] = symbolDrifts[b3];
+    outDrifts[o3B + 1] = symbolDrifts[b3 + 1];
+    outDrifts[o3B + 2] = symbolDrifts[b3 + 2];
+
+    outPhases[vCursor] = symbolPhases[idxA];
+    outPhases[vCursor + 1] = symbolPhases[idxB];
+
+    outAlphas[vCursor] = alphaW;
+    outAlphas[vCursor + 1] = alphaW;
+
+    vCursor += 2;
+  };
+
+  const layerSymbolAlphaWeights = [0.22, 0.38, 0.95];
+  for (let layerIdx = 0; layerIdx < layerCount; layerIdx++) {
+    const layerOff = layerIdx * nPerLayer;
+    const alphaW = layerSymbolAlphaWeights[layerIdx] ?? 0.45;
+    const offsets: readonly number[] =
+      layerIdx === layerCount - 1 ? symCfg.thickStrokeOffsets : [0];
+
+    for (let e = 0; e < edges.length; e++) {
+      const idxA = layerOff + edges[e][0];
+      const idxB = layerOff + edges[e][1];
+
+      const ax = symbolPositions[idxA * 3];
+      const ay = symbolPositions[idxA * 3 + 1];
+      const bx = symbolPositions[idxB * 3];
+      const by = symbolPositions[idxB * 3 + 1];
+      const segLen = Math.hypot(bx - ax, by - ay) || 1;
+      const nx = -(by - ay) / segLen;
+      const ny = (bx - ax) / segLen;
+
+      for (let o = 0; o < offsets.length; o++) {
+        const offWorld = offsets[o] * unitScale;
+        pushSegment(idxA, idxB, alphaW, nx * offWorld, ny * offWorld);
+      }
+    }
+  }
+
+  // Subtle inter-layer z-struts connecting matching symbol nodes on adjacent z-layers
+  for (let layerIdx = 0; layerIdx < layerCount - 1; layerIdx++) {
+    const offA = layerIdx * nPerLayer;
+    const offB = (layerIdx + 1) * nPerLayer;
+    for (let i = 0; i < nPerLayer; i++) {
+      pushSegment(offA + i, offB + i, 0.16, 0, 0);
+    }
+  }
+
+  return vCursor;
+}
+
+/**
+ * Generates the deterministic 3-layer 3D Shield + interior Symbol node/edge network
+ * from `SITE_CONFIG.shield`, distributing exactly `count` particles across the shield
+ * and symbol nodes while preserving identical scroll dispersion & quality tier counts.
+ */
+export function generateShieldNetwork(
+  count: number,
+  symbol: ShieldSymbolName = resolveDefaultSymbolName(),
+  seed = 42,
+): DeltaNetworkData {
+  const rand = createSeededRandom(seed);
+  const cfg = SITE_CONFIG.shield;
+  const symCfg = cfg.symbols[symbol];
+
+  const { boxCenterX, boxCenterY, unitScale } = getShieldBoxTransform();
+
+  const toLocalXY = (bx: number, by: number): [number, number] => [
+    (bx - boxCenterX) * unitScale,
+    (boxCenterY - by) * unitScale,
+  ];
+
+  // --- 1. Build single-layer 2D blueprint (outer outline, inner outline, radial links, 48-node symbol) ---
+  const layerNodes: Layer2DNode[] = [];
+  const layerShieldEdges: Array<[number, number]> = [];
+  const layerSymbolEdges: Array<[number, number]> = [];
+
+  const buildSubdividedClosedOutline = (
+    outline: readonly (readonly [number, number])[],
+    kind: 'outer' | 'inner',
+  ): { cornerNodeIndices: number[]; loopNodeIndices: number[] } => {
+    const cornerNodeIndices: number[] = [];
+    const loopNodeIndices: number[] = [];
+    const step = cfg.subdivideStepUnits;
+    const n = outline.length;
+
+    for (let i = 0; i < n; i++) {
+      const [ax, ay] = outline[i];
+      const [bx, by] = outline[(i + 1) % n];
+      const [lx, ly] = toLocalXY(ax, ay);
+
+      const cornerIdx = layerNodes.length;
+      layerNodes.push({
+        x: lx,
+        y: ly,
+        kind,
+        cornerIndex: i,
+        seqIndex: loopNodeIndices.length,
+        subdivRank: 0,
+      });
+      cornerNodeIndices.push(cornerIdx);
+      loopNodeIndices.push(cornerIdx);
+
+      const segLen = Math.hypot(bx - ax, by - ay);
+      const segments = Math.max(1, Math.round(segLen / step));
+      const midStep = Math.floor(segments / 2);
+
+      for (let s = 1; s < segments; s++) {
+        const t = s / segments;
+        const sx = ax + (bx - ax) * t;
+        const sy = ay + (by - ay) * t;
+        const [slx, sly] = toLocalXY(sx, sy);
+        const subIdx = layerNodes.length;
+        layerNodes.push({
+          x: slx,
+          y: sly,
+          kind,
+          cornerIndex: -1,
+          seqIndex: loopNodeIndices.length,
+          subdivRank: s === midStep ? 1 : 2,
+        });
+        loopNodeIndices.push(subIdx);
+      }
+    }
+
+    for (let k = 0; k < loopNodeIndices.length; k++) {
+      const a = loopNodeIndices[k];
+      const b = loopNodeIndices[(k + 1) % loopNodeIndices.length];
+      layerShieldEdges.push([a, b]);
+    }
+
+    return { cornerNodeIndices, loopNodeIndices };
+  };
+
+  const outer = buildSubdividedClosedOutline(cfg.outerOutline, 'outer');
+  const inner = buildSubdividedClosedOutline(cfg.innerOutline, 'inner');
+  const shieldNodeEnd = outer.loopNodeIndices.length + inner.loopNodeIndices.length;
+
+  // Link each outer primary node to the inner primary node of the same index
+  for (let i = 0; i < cfg.radialLinks.length; i++) {
+    const [oi, ii] = cfg.radialLinks[i];
+    const outerNodeIdx = outer.cornerNodeIndices[oi];
+    const innerNodeIdx = inner.cornerNodeIndices[ii];
+    if (outerNodeIdx !== undefined && innerNodeIdx !== undefined) {
+      layerShieldEdges.push([outerNodeIdx, innerNodeIdx]);
+    }
+  }
+
+  // Build exact 48 interior symbol nodes and edges
+  const symNodes: readonly (readonly [number, number])[] = symCfg.nodes;
+  const symEdges: readonly (readonly [number, number])[] = symCfg.edges;
+  const symbolBaseNodeIndices: number[] = [];
+  const symbolAllNodeIndices: number[] = [];
+  for (let i = 0; i < symNodes.length; i++) {
+    const [bx, by] = symNodes[i];
+    const [lx, ly] = toLocalXY(bx, by);
+    const idx = layerNodes.length;
+    layerNodes.push({
+      x: lx,
+      y: ly,
+      kind: 'symbol',
+      cornerIndex: -1,
+      seqIndex: symbolAllNodeIndices.length,
+      subdivRank: 0,
+    });
+    symbolBaseNodeIndices.push(idx);
+    symbolAllNodeIndices.push(idx);
+  }
+
+  for (let e = 0; e < symEdges.length; e++) {
+    const [aLocal, bLocal] = symEdges[e];
+    const aIdx = symbolBaseNodeIndices[aLocal];
+    const bIdx = symbolBaseNodeIndices[bLocal];
+    layerSymbolEdges.push([aIdx, bIdx]);
+  }
+
+  // --- 2. Duplicate across 3 z-layers (-0.15, 0, +0.15 of shield height) ---
+  const zFractions = cfg.zLayerFractions;
+  const layerCount = zFractions.length; // 3
+  const layerNodeCount = layerNodes.length;
+  const wireframeNodeCount = layerNodeCount * layerCount;
+
+  const wireframeBasePositions = new Float32Array(wireframeNodeCount * 3);
+  const wireframeDriftVectors = new Float32Array(wireframeNodeCount * 3);
+  const wireframePhases = new Float32Array(wireframeNodeCount);
+
+  for (let layerIdx = 0; layerIdx < layerCount; layerIdx++) {
+    const zVal = zFractions[layerIdx] * cfg.worldHeight;
+    const baseOffset = layerIdx * layerNodeCount;
+
+    for (let n = 0; n < layerNodeCount; n++) {
+      const wfIdx = baseOffset + n;
+      const i3 = wfIdx * 3;
+      const node = layerNodes[n];
+
+      const x = node.x;
+      const y = node.y;
+      const z = zVal;
+
+      wireframeBasePositions[i3] = x;
+      wireframeBasePositions[i3 + 1] = y;
+      wireframeBasePositions[i3 + 2] = z;
+
+      const radialLen = Math.hypot(x, y) || 1;
+      const dirX = x / radialLen;
+      const dirY = y / radialLen;
+      const spread = SITE_CONFIG.scroll.radialSpreadFactor * (0.65 + rand() * 0.95);
+
+      wireframeDriftVectors[i3] = dirX * spread + (rand() - 0.5) * 2.2;
+      wireframeDriftVectors[i3 + 1] = dirY * spread + (rand() - 0.5) * 1.8;
+      wireframeDriftVectors[i3 + 2] =
+        -SITE_CONFIG.scroll.streamDepthDistance * (0.45 + rand() * 0.85);
+
+      wireframePhases[wfIdx] = rand() * Math.PI * 2;
+    }
+  }
+
+  // Extract dedicated 3 x 48 = 144 symbol node arrays (fixed drift & phase across all morphs)
+  const symbolNodeCountPerLayer = symNodes.length;
+  const symbolNodeTotalCount = layerCount * symbolNodeCountPerLayer;
+  const symbolNodeBasePositions = new Float32Array(symbolNodeTotalCount * 3);
+  const symbolNodeDriftVectors = new Float32Array(symbolNodeTotalCount * 3);
+  const symbolNodePhases = new Float32Array(symbolNodeTotalCount);
+
+  for (let layerIdx = 0; layerIdx < layerCount; layerIdx++) {
+    const wfLayerOff = layerIdx * layerNodeCount;
+    const symLayerOff = layerIdx * symbolNodeCountPerLayer;
+    for (let i = 0; i < symbolNodeCountPerLayer; i++) {
+      const wfIdx = wfLayerOff + symbolBaseNodeIndices[i];
+      const sIdx = symLayerOff + i;
+      const wf3 = wfIdx * 3;
+      const s3 = sIdx * 3;
+      symbolNodeBasePositions[s3] = wireframeBasePositions[wf3];
+      symbolNodeBasePositions[s3 + 1] = wireframeBasePositions[wf3 + 1];
+      symbolNodeBasePositions[s3 + 2] = wireframeBasePositions[wf3 + 2];
+
+      symbolNodeDriftVectors[s3] = wireframeDriftVectors[wf3];
+      symbolNodeDriftVectors[s3 + 1] = wireframeDriftVectors[wf3 + 1];
+      symbolNodeDriftVectors[s3 + 2] = wireframeDriftVectors[wf3 + 2];
+
+      symbolNodePhases[sIdx] = wireframePhases[wfIdx];
+    }
+  }
+
+  // Build 3-layer symbol packet edges (indexed 0..143) for each symbol
+  const buildSymbolPacketEdges = (symName: ShieldSymbolName): Uint16Array => {
+    const edges = cfg.symbols[symName].edges;
+    const nPerLayer = cfg.symbols[symName].nodes.length;
+    const list: number[] = [];
+    for (let layerIdx = 0; layerIdx < layerCount; layerIdx++) {
+      const off = layerIdx * nPerLayer;
+      for (let e = 0; e < edges.length; e++) {
+        list.push(off + edges[e][0], off + edges[e][1]);
+      }
+    }
+    for (let layerIdx = 0; layerIdx < layerCount - 1; layerIdx++) {
+      const offA = layerIdx * nPerLayer;
+      const offB = (layerIdx + 1) * nPerLayer;
+      for (let i = 0; i < nPerLayer; i++) {
+        list.push(offA + i, offB + i);
+      }
+    }
+    return new Uint16Array(list);
+  };
+
+  const symbolPacketEdges: Record<ShieldSymbolName, Uint16Array> = {
+    term: buildSymbolPacketEdges('term'),
+    hat: buildSymbolPacketEdges('hat'),
+    code: buildSymbolPacketEdges('code'),
+  };
+
+  const symbolTargetPositions = buildShieldSymbolTargets();
+
+  // --- 3. Assemble 3-layer shield wireframe edges + inter-layer short edges ---
+  const shieldEdgeList: number[] = [];
+  const shieldEdgeAlphaList: number[] = [];
+  const shieldPacketEdgeList: number[] = [];
+  const shieldPacketEdgeSet = new Set<number>();
+  const packetEdgeList: number[] = [];
+  const packetEdgeSet = new Set<number>();
+
+  const addShieldPacketEdge = (a: number, b: number) => {
+    const min = Math.min(a, b);
+    const max = Math.max(a, b);
+    const key = min * wireframeNodeCount + max;
+    if (!shieldPacketEdgeSet.has(key)) {
+      shieldPacketEdgeSet.add(key);
+      shieldPacketEdgeList.push(min, max);
+    }
+    if (!packetEdgeSet.has(key)) {
+      packetEdgeSet.add(key);
+      packetEdgeList.push(min, max);
+    }
+  };
+
+  const addPacketEdge = (a: number, b: number) => {
+    const min = Math.min(a, b);
+    const max = Math.max(a, b);
+    const key = min * wireframeNodeCount + max;
+    if (packetEdgeSet.has(key)) return;
+    packetEdgeSet.add(key);
+    packetEdgeList.push(min, max);
+  };
+
+  const layerShieldAlphaWeights = [0.55, 0.80, 1.0];
+  for (let layerIdx = 0; layerIdx < layerCount; layerIdx++) {
+    const offset = layerIdx * layerNodeCount;
+    const alphaW = layerShieldAlphaWeights[layerIdx] ?? 0.8;
+    for (let e = 0; e < layerShieldEdges.length; e++) {
+      const a = offset + layerShieldEdges[e][0];
+      const b = offset + layerShieldEdges[e][1];
+      shieldEdgeList.push(a, b);
+      shieldEdgeAlphaList.push(alphaW);
+      addShieldPacketEdge(a, b);
+    }
+  }
+
+  // Short edges between matching shield nodes on adjacent z-layers (0<->1 and 1<->2)
+  for (let layerIdx = 0; layerIdx < layerCount - 1; layerIdx++) {
+    const offA = layerIdx * layerNodeCount;
+    const offB = (layerIdx + 1) * layerNodeCount;
+    for (let n = 0; n < shieldNodeEnd; n++) {
+      const a = offA + n;
+      const b = offB + n;
+      shieldEdgeList.push(a, b);
+      shieldEdgeAlphaList.push(0.45);
+      addShieldPacketEdge(a, b);
+    }
+  }
+
+  // Add symbol edges to the combined packet edge list for legacy callers/tests
+  for (let layerIdx = 0; layerIdx < layerCount; layerIdx++) {
+    const offset = layerIdx * layerNodeCount;
+    for (let e = 0; e < layerSymbolEdges.length; e++) {
+      addPacketEdge(offset + layerSymbolEdges[e][0], offset + layerSymbolEdges[e][1]);
+    }
+  }
+  for (let layerIdx = 0; layerIdx < layerCount - 1; layerIdx++) {
+    const offA = layerIdx * layerNodeCount;
+    const offB = (layerIdx + 1) * layerNodeCount;
+    for (let s = 0; s < symbolAllNodeIndices.length; s++) {
+      addPacketEdge(offA + symbolAllNodeIndices[s], offB + symbolAllNodeIndices[s]);
+    }
+  }
+
+  // --- 4. Assemble initial 3-layer accent symbol line segments via shared zero-alloc writer ---
+  const maxSymVerts = computeMaxSymbolSegmentVertices();
+  const tmpPos = new Float32Array(maxSymVerts * 3);
+  const tmpDrift = new Float32Array(maxSymVerts * 3);
+  const tmpPhase = new Float32Array(maxSymVerts);
+  const tmpAlpha = new Float32Array(maxSymVerts);
+  const writtenVerts = writeSymbolSegmentsBuffer({
+    symbol,
+    symbolPositions: symbolNodeBasePositions,
+    symbolDrifts: symbolNodeDriftVectors,
+    symbolPhases: symbolNodePhases,
+    unitScale,
+    outPositions: tmpPos,
+    outDrifts: tmpDrift,
+    outPhases: tmpPhase,
+    outAlphas: tmpAlpha,
+  });
+
+  const wireframeSymbolSegments = tmpPos.slice(0, writtenVerts * 3);
+  const wireframeSymbolDrifts = tmpDrift.slice(0, writtenVerts * 3);
+  const wireframeSymbolPhases = tmpPhase.slice(0, writtenVerts);
+  const wireframeSymbolAlpha = tmpAlpha.slice(0, writtenVerts);
+
+  // --- 5A. Select dedicated shield-only dots (preserves exact shield dot density across all 3 tiers) ---
+  const targetShieldDotCount = Math.max(28, Math.round(count * 0.78));
+  const selectedShieldWfIndices: number[] = [];
+  const selectedShieldSet = new Set<number>();
+
+  const trySelectShieldOnly = (layerIdx: number, localIdx: number): boolean => {
+    if (selectedShieldWfIndices.length >= targetShieldDotCount) return false;
+    const wfIdx = layerIdx * layerNodeCount + localIdx;
+    if (selectedShieldSet.has(wfIdx)) return false;
+    selectedShieldSet.add(wfIdx);
+    selectedShieldWfIndices.push(wfIdx);
+    return true;
+  };
+
+  const layerOrderA = [2, 1, 0];
+  const layerOrderB = [1, 2, 0];
+
+  // Shield primary corners across 3 z-layers
+  for (let c = 0; c < outer.cornerNodeIndices.length; c++) {
+    trySelectShieldOnly(layerOrderA[c % 3], outer.cornerNodeIndices[c]);
+  }
+  for (let c = 0; c < inner.cornerNodeIndices.length; c++) {
+    trySelectShieldOnly(layerOrderB[c % 3], inner.cornerNodeIndices[c]);
+  }
+  // Shield midpoints (subdivRank === 1)
+  for (let k = 0; k < outer.loopNodeIndices.length; k++) {
+    const localIdx = outer.loopNodeIndices[k];
+    if (layerNodes[localIdx].subdivRank === 1) {
+      trySelectShieldOnly(layerOrderA[k % 3], localIdx);
+    }
+  }
+  for (let k = 0; k < inner.loopNodeIndices.length; k++) {
+    const localIdx = inner.loopNodeIndices[k];
+    if (layerNodes[localIdx].subdivRank === 1) {
+      trySelectShieldOnly(layerOrderB[k % 3], localIdx);
+    }
+  }
+  // Remaining subdivided shield outline positions (subdivRank === 2)
+  for (let k = 0; k < outer.loopNodeIndices.length; k++) {
+    const localIdx = outer.loopNodeIndices[k];
+    if (layerNodes[localIdx].subdivRank === 2) {
+      trySelectShieldOnly(layerOrderA[k % 3], localIdx);
+    }
+  }
+  for (let k = 0; k < inner.loopNodeIndices.length; k++) {
+    const localIdx = inner.loopNodeIndices[k];
+    if (layerNodes[localIdx].subdivRank === 2) {
+      trySelectShieldOnly(layerOrderB[k % 3], localIdx);
+    }
+  }
+  // Extra depth corners on remaining z-layers
+  for (let pass = 0; pass < 3 && selectedShieldWfIndices.length < targetShieldDotCount; pass++) {
+    for (
+      let c = 0;
+      c < outer.cornerNodeIndices.length && selectedShieldWfIndices.length < targetShieldDotCount;
+      c++
+    ) {
+      trySelectShieldOnly((pass + 2) % 3, outer.cornerNodeIndices[c]);
+    }
+    for (
+      let c = 0;
+      c < inner.cornerNodeIndices.length && selectedShieldWfIndices.length < targetShieldDotCount;
+      c++
+    ) {
+      trySelectShieldOnly((pass + 1) % 3, inner.cornerNodeIndices[c]);
+    }
+  }
+
+  const shieldDotCount = selectedShieldWfIndices.length;
+  const shieldOnlyPositions = new Float32Array(shieldDotCount * 3);
+  const shieldOnlyDrifts = new Float32Array(shieldDotCount * 3);
+  const shieldOnlyPhases = new Float32Array(shieldDotCount);
+
+  for (let p = 0; p < shieldDotCount; p++) {
+    const wfIdx = selectedShieldWfIndices[p];
+    const p3 = p * 3;
+    const wf3 = wfIdx * 3;
+    shieldOnlyPositions[p3] = wireframeBasePositions[wf3];
+    shieldOnlyPositions[p3 + 1] = wireframeBasePositions[wf3 + 1];
+    shieldOnlyPositions[p3 + 2] = wireframeBasePositions[wf3 + 2];
+
+    shieldOnlyDrifts[p3] = wireframeDriftVectors[wf3];
+    shieldOnlyDrifts[p3 + 1] = wireframeDriftVectors[wf3 + 1];
+    shieldOnlyDrifts[p3 + 2] = wireframeDriftVectors[wf3 + 2];
+
+    shieldOnlyPhases[p] = wireframePhases[wfIdx];
+  }
+
+  // --- 5B. Distribute EXACTLY `count` particles deterministically across shield & symbol nodes ---
+  const selectedWfIndices: number[] = [];
+  const selectedSet = new Set<number>();
+
+  const trySelect = (layerIdx: number, localIdx: number): boolean => {
+    if (selectedWfIndices.length >= count) return false;
+    const wfIdx = layerIdx * layerNodeCount + localIdx;
+    if (selectedSet.has(wfIdx)) return false;
+    selectedSet.add(wfIdx);
+    selectedWfIndices.push(wfIdx);
+    return true;
+  };
+
+  // Priority 1: All 14 primary outer corners and 14 primary inner corners staggered across 3 z-layers
+  for (let c = 0; c < outer.cornerNodeIndices.length; c++) {
+    trySelect(layerOrderA[c % 3], outer.cornerNodeIndices[c]);
+  }
+  for (let c = 0; c < inner.cornerNodeIndices.length; c++) {
+    trySelect(layerOrderB[c % 3], inner.cornerNodeIndices[c]);
+  }
+
+  // Priority 2: Front-layer (z = +0.15H) symbol nodes
+  for (let s = 0; s < symbolAllNodeIndices.length; s++) {
+    trySelect(2, symbolAllNodeIndices[s]);
+  }
+
+  // Priority 3: Midpoints (subdivRank === 1) around outer & inner outlines
+  for (let k = 0; k < outer.loopNodeIndices.length; k++) {
+    const localIdx = outer.loopNodeIndices[k];
+    if (layerNodes[localIdx].subdivRank === 1) {
+      trySelect(layerOrderA[k % 3], localIdx);
+    }
+  }
+  for (let k = 0; k < inner.loopNodeIndices.length; k++) {
+    const localIdx = inner.loopNodeIndices[k];
+    if (layerNodes[localIdx].subdivRank === 1) {
+      trySelect(layerOrderB[k % 3], localIdx);
+    }
+  }
+
+  // Priority 4: Middle-layer (z = 0) symbol nodes on high tier
+  if (count >= 140) {
+    for (let s = 0; s < symbolAllNodeIndices.length; s++) {
+      trySelect(1, symbolAllNodeIndices[s]);
+    }
+  }
+
+  // Priority 5: Remaining subdivided outline positions (subdivRank === 2)
+  for (let k = 0; k < outer.loopNodeIndices.length; k++) {
+    const localIdx = outer.loopNodeIndices[k];
+    if (layerNodes[localIdx].subdivRank === 2) {
+      trySelect(layerOrderA[k % 3], localIdx);
+    }
+  }
+  for (let k = 0; k < inner.loopNodeIndices.length; k++) {
+    const localIdx = inner.loopNodeIndices[k];
+    if (layerNodes[localIdx].subdivRank === 2) {
+      trySelect(layerOrderB[k % 3], localIdx);
+    }
+  }
+
+  // Priority 6: Back-layer (z = -0.15H) symbol nodes & any remaining blueprint nodes
+  for (let s = 0; s < symbolAllNodeIndices.length; s++) {
+    trySelect(0, symbolAllNodeIndices[s]);
+  }
+  for (let layerIdx = layerCount - 1; layerIdx >= 0 && selectedWfIndices.length < count; layerIdx--) {
+    for (let n = 0; n < layerNodeCount && selectedWfIndices.length < count; n++) {
+      trySelect(layerIdx, n);
+    }
+  }
+
+  let fallbackCursor = 0;
+  while (selectedWfIndices.length < count) {
+    selectedWfIndices.push(fallbackCursor % wireframeNodeCount);
+    fallbackCursor++;
+  }
 
   const basePositions = new Float32Array(count * 3);
   const driftVectors = new Float32Array(count * 3);
   const phases = new Float32Array(count);
   const nodeColors = new Float32Array(count * 3);
+  const nodeIsSymbol = new Uint8Array(count);
 
-  const ivoryRgb = hexToRgbNormalized(SITE_CONFIG.colors.text);
-  const cyanRgb = hexToRgbNormalized(SITE_CONFIG.colors.accent);
+  const mutedRgb = hexToRgbNormalized(SITE_CONFIG.colors.textMuted);
+  const accentRgb = hexToRgbNormalized(SITE_CONFIG.colors.accent);
 
-  const perimeterCount = Math.max(9, Math.floor(count * 0.75));
-  const nodesPerEdge = Math.floor(perimeterCount / 3);
-
-  for (let i = 0; i < count; i++) {
-    const i3 = i * 3;
-    let x = 0;
-    let y = 0;
-    let z = 0;
-
-    if (i < nodesPerEdge * 3) {
-      const edgeIdx = Math.floor(i / nodesPerEdge);
-      const stepIdx = i % nodesPerEdge;
-      const a = vertices[edgeIdx];
-      const b = vertices[(edgeIdx + 1) % 3];
-      const baseT = stepIdx / nodesPerEdge;
-      const jitterT = stepIdx === 0 ? 0 : (rand() - 0.5) * (0.65 / nodesPerEdge);
-      const t = Math.max(0, Math.min(1, baseT + jitterT));
-
-      const inwardRing = stepIdx % 2 === 0 ? 0.0 : 0.075 + rand() * 0.05;
-      const edgeX = a.x + (b.x - a.x) * t;
-      const edgeY = a.y + (b.y - a.y) * t;
-
-      x = edgeX * (1 - inwardRing) + (rand() - 0.5) * 0.06;
-      y = edgeY * (1 - inwardRing) + (rand() - 0.5) * 0.06;
-      z = stepIdx === 0 ? 0 : (rand() - 0.5) * thickness;
-    } else {
-      let u = rand();
-      let v = rand();
-      if (u + v > 1) {
-        u = 1 - u;
-        v = 1 - v;
-      }
-      const w = 1 - u - v;
-      x = (u * vTop.x + v * vLeft.x + w * vRight.x) * 0.82;
-      y = (u * vTop.y + v * vLeft.y + w * vRight.y) * 0.82;
-      z = (rand() - 0.5) * (thickness * 1.3);
+  const wfToParticle = new Map<number, number>();
+  for (let p = 0; p < count; p++) {
+    const wfIdx = selectedWfIndices[p];
+    if (!wfToParticle.has(wfIdx)) {
+      wfToParticle.set(wfIdx, p);
     }
 
-    basePositions[i3] = x;
-    basePositions[i3 + 1] = y;
-    basePositions[i3 + 2] = z;
+    const p3 = p * 3;
+    const wf3 = wfIdx * 3;
+    basePositions[p3] = wireframeBasePositions[wf3];
+    basePositions[p3 + 1] = wireframeBasePositions[wf3 + 1];
+    basePositions[p3 + 2] = wireframeBasePositions[wf3 + 2];
 
-    const radialLen = Math.hypot(x, y) || 1;
-    const dirX = x / radialLen;
-    const dirY = y / radialLen;
-    const spread = SITE_CONFIG.scroll.radialSpreadFactor * (0.65 + rand() * 0.95);
+    driftVectors[p3] = wireframeDriftVectors[wf3];
+    driftVectors[p3 + 1] = wireframeDriftVectors[wf3 + 1];
+    driftVectors[p3 + 2] = wireframeDriftVectors[wf3 + 2];
 
-    driftVectors[i3] = dirX * spread + (rand() - 0.5) * 2.2;
-    driftVectors[i3 + 1] = dirY * spread + (rand() - 0.5) * 1.8;
-    driftVectors[i3 + 2] = -SITE_CONFIG.scroll.streamDepthDistance * (0.45 + rand() * 0.85);
+    phases[p] = wireframePhases[wfIdx];
 
-    phases[i] = rand() * Math.PI * 2;
+    const localIdx = wfIdx % layerNodeCount;
+    const isSym = layerNodes[localIdx].kind === 'symbol' ? 1 : 0;
+    nodeIsSymbol[p] = isSym;
 
-    const isCorner = i < nodesPerEdge * 3 && i % nodesPerEdge === 0;
-    const isCyanAccent = isCorner || rand() < 0.15;
-    const rgb = isCyanAccent ? cyanRgb : ivoryRgb;
-    nodeColors[i3] = rgb[0];
-    nodeColors[i3 + 1] = rgb[1];
-    nodeColors[i3 + 2] = rgb[2];
+    const rgb = isSym ? accentRgb : mutedRgb;
+    nodeColors[p3] = rgb[0];
+    nodeColors[p3 + 1] = rgb[1];
+    nodeColors[p3 + 2] = rgb[2];
   }
 
-  const maxDistSq =
-    SITE_CONFIG.particles.maxConnectionDistance *
-    SITE_CONFIG.particles.maxConnectionDistance;
-  const maxPerNode = SITE_CONFIG.particles.maxConnectionsPerNode;
-  const connectionCounts = new Uint8Array(count);
-  const edges: number[] = [];
-  const edgeSet = new Set<number>();
-
-  const addEdge = (a: number, b: number) => {
+  // --- 6. Build particle-indexed edgeIndices (valid pairs in [0, count - 1]) ---
+  const particleEdges: number[] = [];
+  const particleEdgeSet = new Set<number>();
+  const addParticleEdge = (a: number, b: number) => {
+    if (a === b || a < 0 || b < 0 || a >= count || b >= count) return;
     const min = Math.min(a, b);
     const max = Math.max(a, b);
     const key = min * count + max;
-    if (edgeSet.has(key)) return;
-    edgeSet.add(key);
-    edges.push(min, max);
-    connectionCounts[min]++;
-    connectionCounts[max]++;
+    if (particleEdgeSet.has(key)) return;
+    particleEdgeSet.add(key);
+    particleEdges.push(min, max);
   };
 
-  const totalPerimeter = nodesPerEdge * 3;
-  for (let i = 0; i < totalPerimeter; i++) {
-    const nextOnPerimeter = (i + 1) % totalPerimeter;
-    addEdge(i, nextOnPerimeter);
-    if (totalPerimeter >= 12) {
-      const skipOne = (i + 2) % totalPerimeter;
-      addEdge(i, skipOne);
+  for (let i = 0; i < packetEdgeList.length; i += 2) {
+    const pA = wfToParticle.get(packetEdgeList[i]);
+    const pB = wfToParticle.get(packetEdgeList[i + 1]);
+    if (pA !== undefined && pB !== undefined) {
+      addParticleEdge(pA, pB);
     }
   }
 
-  for (let i = 0; i < count; i++) {
-    if (connectionCounts[i] >= maxPerNode) continue;
-    const ix = basePositions[i * 3];
-    const iy = basePositions[i * 3 + 1];
-    const iz = basePositions[i * 3 + 2];
-
-    for (let j = i + 1; j < count; j++) {
-      if (connectionCounts[j] >= maxPerNode) continue;
-      const dx = ix - basePositions[j * 3];
-      const dy = iy - basePositions[j * 3 + 1];
-      const dz = iz - basePositions[j * 3 + 2];
-      const distSq = dx * dx + dy * dy + dz * dz;
-
-      if (distSq <= maxDistSq) {
-        addEdge(i, j);
-        if (connectionCounts[i] >= maxPerNode) break;
-      }
+  // Also link consecutive selected particles along the outer and inner shield outlines
+  const outerSelectedBySeq: Array<{ seq: number; p: number }> = [];
+  const innerSelectedBySeq: Array<{ seq: number; p: number }> = [];
+  for (let p = 0; p < count; p++) {
+    const localIdx = selectedWfIndices[p] % layerNodeCount;
+    const node = layerNodes[localIdx];
+    if (node.kind === 'outer') {
+      outerSelectedBySeq.push({ seq: node.seqIndex, p });
+    } else if (node.kind === 'inner') {
+      innerSelectedBySeq.push({ seq: node.seqIndex, p });
     }
+  }
+  outerSelectedBySeq.sort((a, b) => a.seq - b.seq);
+  innerSelectedBySeq.sort((a, b) => a.seq - b.seq);
+
+  for (let i = 0; i < outerSelectedBySeq.length; i++) {
+    const next = (i + 1) % outerSelectedBySeq.length;
+    addParticleEdge(outerSelectedBySeq[i].p, outerSelectedBySeq[next].p);
+  }
+  for (let i = 0; i < innerSelectedBySeq.length; i++) {
+    const next = (i + 1) % innerSelectedBySeq.length;
+    addParticleEdge(innerSelectedBySeq[i].p, innerSelectedBySeq[next].p);
   }
 
   return {
@@ -593,7 +1287,285 @@ export function generateDeltaNetwork(count: number, seed = 42): DeltaNetworkData
     driftVectors,
     phases,
     nodeColors,
-    edgeIndices: new Uint16Array(edges),
+    nodeIsSymbol,
+    edgeIndices: new Uint16Array(particleEdges),
+    symbol,
+    wireframeBasePositions,
+    wireframeDriftVectors,
+    wireframePhases,
+    wireframeShieldEdgeIndices: new Uint16Array(shieldEdgeList),
+    wireframeShieldEdgeAlpha: new Float32Array(shieldEdgeAlphaList),
+    wireframeShieldPacketEdges: new Uint16Array(shieldPacketEdgeList),
+    wireframeSymbolSegments,
+    wireframeSymbolDrifts,
+    wireframeSymbolPhases,
+    wireframeSymbolAlpha,
+    wireframePacketEdges: new Uint16Array(packetEdgeList),
+    shieldOnlyPositions,
+    shieldOnlyDrifts,
+    shieldOnlyPhases,
+    symbolNodeCountPerLayer,
+    symbolLayerCount: layerCount,
+    symbolNodeTotalCount,
+    symbolNodeBasePositions,
+    symbolNodeDriftVectors,
+    symbolNodePhases,
+    symbolTargetPositions,
+    symbolPacketEdges,
+    unitScale,
+  };
+}
+
+/**
+ * Generates the hero 3D Shield node/edge network and deterministic dispersion vectors.
+ * Retained under the `generateDeltaNetwork` name for compatibility across existing callers and tests.
+ */
+export function generateDeltaNetwork(count: number, seed = 42): DeltaNetworkData {
+  return generateShieldNetwork(count, resolveDefaultSymbolName(), seed);
+}
+
+export type SymbolCyclePhase = 'HOLD' | 'MORPH';
+
+export interface SymbolCycleState {
+  currentIndex: number;
+  targetIndex: number;
+  phase: SymbolCyclePhase;
+  phaseElapsedMs: number;
+  edgeFadeInElapsedMs: number;
+  edgeSymbol: ShieldSymbolName;
+  edgeAlpha: number;
+  morphProgress: number;
+  secondsUntilNext: number | null;
+  isStatic: boolean;
+}
+
+export interface SymbolCycleStepResult {
+  startedMorph: boolean;
+  switchedEdgeSymbol: boolean;
+  symbolChanged: boolean;
+  activeSymbol: ShieldSymbolName;
+  targetSymbol: ShieldSymbolName;
+}
+
+/**
+ * Cubic ease-in-out curve for smooth symbol morphing.
+ */
+export function easeInOutCubic(t: number): number {
+  const c = Math.max(0, Math.min(1, t));
+  return c < 0.5 ? 4 * c * c * c : 1 - Math.pow(-2 * c + 2, 3) / 2;
+}
+
+/**
+ * Returns true when the shield interior symbol cycle must be disabled
+ * (fixed SHIELD_SYMBOL config, low quality tier, prefers-reduced-motion, Save-Data, or Plain view).
+ */
+export function shouldDisableSymbolCycle(params: {
+  shieldSymbolConfig?: ShieldSymbolConfig;
+  plainView: boolean;
+  prefersReducedMotion: boolean;
+  qualityTier: QualityTierName;
+  saveData: boolean;
+}): boolean {
+  const cfgMode = params.shieldSymbolConfig ?? SITE_CONFIG.shield.SHIELD_SYMBOL;
+  if (cfgMode !== 'cycle') return true;
+  return Boolean(
+    params.plainView ||
+      params.prefersReducedMotion ||
+      params.qualityTier === 'low' ||
+      params.saveData,
+  );
+}
+
+/**
+ * Resolves the static symbol to display when symbol cycling is disabled.
+ * In low quality tier, prefers-reduced-motion, Save-Data mode, or Plain view, always shows static "term".
+ */
+export function resolveStaticShieldSymbol(params: {
+  shieldSymbolConfig?: ShieldSymbolConfig;
+  plainView: boolean;
+  prefersReducedMotion: boolean;
+  qualityTier: QualityTierName;
+  saveData: boolean;
+}): ShieldSymbolName {
+  if (
+    params.plainView ||
+    params.prefersReducedMotion ||
+    params.qualityTier === 'low' ||
+    params.saveData
+  ) {
+    return 'term';
+  }
+  const cfgMode = params.shieldSymbolConfig ?? SITE_CONFIG.shield.SHIELD_SYMBOL;
+  if (cfgMode !== 'cycle') return cfgMode;
+  return SITE_CONFIG.shield.SYMBOL_ORDER[0] ?? 'term';
+}
+
+/**
+ * Initializes the ref-backed state object for the shield interior symbol cycle.
+ */
+export function createSymbolCycleState(params: {
+  shieldSymbolConfig?: ShieldSymbolConfig;
+  plainView: boolean;
+  prefersReducedMotion: boolean;
+  qualityTier: QualityTierName;
+  saveData: boolean;
+}): SymbolCycleState {
+  const order = SITE_CONFIG.shield.SYMBOL_ORDER;
+  const isStatic = shouldDisableSymbolCycle(params);
+  const startSym = isStatic
+    ? resolveStaticShieldSymbol(params)
+    : (order[0] ?? 'term');
+  const startIdx = Math.max(0, order.indexOf(startSym));
+
+  return {
+    currentIndex: startIdx,
+    targetIndex: startIdx,
+    phase: 'HOLD',
+    phaseElapsedMs: 0,
+    edgeFadeInElapsedMs: SITE_CONFIG.shield.symbolEdgeFadeInMs,
+    edgeSymbol: startSym,
+    edgeAlpha: 1,
+    morphProgress: 0,
+    secondsUntilNext: isStatic ? null : SITE_CONFIG.shield.SYMBOL_HOLD_MS / 1000,
+    isStatic,
+  };
+}
+
+/**
+ * Advances the symbol cycle state machine in place (zero allocations per frame).
+ * Pauses completely when `isActive` is false (dispersed/scrolled away, tab hidden, or canvas off-screen).
+ */
+export function stepSymbolCycleState(
+  state: SymbolCycleState,
+  params: {
+    dtMs: number;
+    isActive: boolean;
+    disableCycle: boolean;
+    staticSymbol: ShieldSymbolName;
+    order?: readonly ShieldSymbolName[];
+    holdMs?: number;
+    morphMs?: number;
+    fadeOutMs?: number;
+    fadeInMs?: number;
+  },
+): SymbolCycleStepResult {
+  const order = params.order ?? SITE_CONFIG.shield.SYMBOL_ORDER;
+  const holdMs = Math.max(1, params.holdMs ?? SITE_CONFIG.shield.SYMBOL_HOLD_MS);
+  const morphMs = Math.max(1, params.morphMs ?? SITE_CONFIG.shield.SYMBOL_MORPH_MS);
+  const fadeOutMs = Math.max(1, params.fadeOutMs ?? SITE_CONFIG.shield.symbolEdgeFadeOutMs);
+  const fadeInMs = Math.max(1, params.fadeInMs ?? SITE_CONFIG.shield.symbolEdgeFadeInMs);
+
+  if (params.disableCycle) {
+    const targetIdx = Math.max(0, order.indexOf(params.staticSymbol));
+    const switchedEdgeSymbol = state.edgeSymbol !== params.staticSymbol;
+    const symbolChanged = switchedEdgeSymbol || !state.isStatic;
+    state.isStatic = true;
+    state.phase = 'HOLD';
+    state.phaseElapsedMs = 0;
+    state.edgeFadeInElapsedMs = fadeInMs;
+    state.currentIndex = targetIdx;
+    state.targetIndex = targetIdx;
+    state.edgeSymbol = params.staticSymbol;
+    state.edgeAlpha = 1;
+    state.morphProgress = 0;
+    state.secondsUntilNext = null;
+    return {
+      startedMorph: false,
+      switchedEdgeSymbol,
+      symbolChanged,
+      activeSymbol: params.staticSymbol,
+      targetSymbol: params.staticSymbol,
+    };
+  }
+
+  const wasStatic = state.isStatic;
+  state.isStatic = false;
+
+  const currentSym = order[state.currentIndex] ?? 'term';
+  const targetSym = order[state.targetIndex] ?? currentSym;
+
+  if (!params.isActive) {
+    if (wasStatic) {
+      state.secondsUntilNext =
+        state.phase === 'HOLD'
+          ? Math.max(0, (holdMs - state.phaseElapsedMs) / 1000)
+          : Math.max(0, (morphMs - state.phaseElapsedMs) / 1000);
+    }
+    return {
+      startedMorph: false,
+      switchedEdgeSymbol: false,
+      symbolChanged: wasStatic,
+      activeSymbol: currentSym,
+      targetSymbol: state.phase === 'MORPH' ? targetSym : currentSym,
+    };
+  }
+
+  const safeDtMs = Math.max(0, Math.min(100, params.dtMs));
+
+  if (state.phase === 'HOLD') {
+    state.phaseElapsedMs += safeDtMs;
+    state.edgeFadeInElapsedMs = Math.min(fadeInMs, state.edgeFadeInElapsedMs + safeDtMs);
+    state.edgeAlpha = Math.max(0, Math.min(1, state.edgeFadeInElapsedMs / fadeInMs));
+    state.morphProgress = 0;
+
+    if (state.phaseElapsedMs >= holdMs) {
+      const overflow = Math.min(safeDtMs, state.phaseElapsedMs - holdMs);
+      state.phase = 'MORPH';
+      state.targetIndex = (state.currentIndex + 1) % order.length;
+      state.phaseElapsedMs = overflow;
+      state.edgeAlpha = Math.max(0, 1 - state.phaseElapsedMs / fadeOutMs);
+      state.morphProgress = easeInOutCubic(state.phaseElapsedMs / morphMs);
+      state.secondsUntilNext = Math.max(0, (morphMs - state.phaseElapsedMs) / 1000);
+      const nextSym = order[state.targetIndex] ?? 'term';
+      return {
+        startedMorph: true,
+        switchedEdgeSymbol: false,
+        symbolChanged: true,
+        activeSymbol: currentSym,
+        targetSymbol: nextSym,
+      };
+    }
+
+    state.secondsUntilNext = Math.max(0, (holdMs - state.phaseElapsedMs) / 1000);
+    return {
+      startedMorph: false,
+      switchedEdgeSymbol: false,
+      symbolChanged: wasStatic,
+      activeSymbol: currentSym,
+      targetSymbol: currentSym,
+    };
+  }
+
+  // state.phase === 'MORPH'
+  state.phaseElapsedMs += safeDtMs;
+  if (state.phaseElapsedMs >= morphMs) {
+    state.currentIndex = state.targetIndex;
+    const landedSym = order[state.currentIndex] ?? 'term';
+    state.phase = 'HOLD';
+    state.phaseElapsedMs = 0;
+    state.edgeFadeInElapsedMs = 0;
+    state.edgeSymbol = landedSym;
+    state.edgeAlpha = 0;
+    state.morphProgress = 0;
+    state.secondsUntilNext = holdMs / 1000;
+    return {
+      startedMorph: false,
+      switchedEdgeSymbol: true,
+      symbolChanged: true,
+      activeSymbol: landedSym,
+      targetSymbol: landedSym,
+    };
+  }
+
+  state.edgeAlpha = Math.max(0, 1 - state.phaseElapsedMs / fadeOutMs);
+  state.morphProgress = easeInOutCubic(state.phaseElapsedMs / morphMs);
+  state.secondsUntilNext = Math.max(0, (morphMs - state.phaseElapsedMs) / 1000);
+  return {
+    startedMorph: false,
+    switchedEdgeSymbol: false,
+    symbolChanged: wasStatic,
+    activeSymbol: currentSym,
+    targetSymbol: targetSym,
   };
 }
 
@@ -1713,6 +2685,190 @@ export function selectNonOverlappingLitLeafNodes(options: {
   }
 
   return chosen;
+}
+
+export interface HeroShieldPlacement {
+  /** World-space anchor X (same centre point as before) */
+  anchorX: number;
+  /** World-space anchor Y (same centre point as before) */
+  anchorY: number;
+  /** Desired height in CSS pixels before obstacle clearance scaling */
+  targetHeightPx: number;
+  /** Final rendered shield height in CSS pixels at hero depth (z = 0) */
+  finalHeightPx: number;
+  /** Uniform 3D scale applied to deltaGroup (scales width, height, and 3 z-layer offsets proportionally) */
+  scale: number;
+  /** Projected conservative screen-space envelope (including 3 z-layers and +/-15 deg sway) */
+  screenBox: ScreenBoxRect;
+}
+
+/**
+ * Projected outer envelope ratios relative to the shield's z = 0 CSS pixel height.
+ * Outer shield is 84 x 108 in the 100 x 120 box (aspect 0.7778) with 3 z-layers at +/-0.15H,
+ * +/-15 deg yaw sway, +/-3.4 deg tilt, and front-layer perspective magnification.
+ */
+const SHIELD_ENVELOPE_HALF_WIDTH_RATIO = 0.45;
+const SHIELD_ENVELOPE_HALF_HEIGHT_RATIO = 0.54;
+
+/**
+ * Computes the hero shield's placement and uniform 3D scale at hero depth (z = 0):
+ * - Keeps the exact same centre point / anchor per breakpoint as before.
+ * - Desktop (>= 768px): targets SHIELD_HEIGHT_VH (42% vh), clamped to [260px, 480px].
+ * - Mobile (< 768px): targets 30% of viewport height.
+ * - Short windows: scales down if needed so it never overlaps the top nav bar or hero bottom line.
+ * - Name clearance: scales down just enough so it always clears "VAIBHAV MARATHE" by >= 40px.
+ */
+export function computeHeroShieldPlacement(options: {
+  viewportWidth: number;
+  viewportHeight: number;
+  fovDeg?: number;
+  cameraZ?: number;
+  nameRect?: ScreenBoxRect | null;
+  opaqueContainerRect?: ScreenBoxRect | null;
+  navBottomPx?: number;
+  heroBottomLineTopPx?: number;
+}): HeroShieldPlacement {
+  const vw = Math.max(1, options.viewportWidth);
+  const vh = Math.max(1, options.viewportHeight);
+  const fovDeg = options.fovDeg ?? 45;
+  const cameraZ = options.cameraZ ?? SITE_CONFIG.scroll.cameraStartZ;
+  const cfg = SITE_CONFIG.shield;
+
+  // Preserve the exact same centre point / anchor per breakpoint
+  let anchorX: number;
+  let anchorY: number;
+  if (vw < 768) {
+    anchorX = 0;
+    anchorY = -0.78;
+  } else if (vw < 1024) {
+    anchorX = 1.88;
+    anchorY = -0.05;
+  } else if (vw < 1280) {
+    anchorX = 2.18;
+    anchorY = 0.02;
+  } else {
+    anchorX = 2.38;
+    anchorY = 0.05;
+  }
+
+  const visibleWorldHeight = 2 * cameraZ * Math.tan((fovDeg * Math.PI) / 360);
+  const pxPerWorld = vh / visibleWorldHeight;
+
+  const centerPxX = vw * 0.5 + anchorX * pxPerWorld;
+  const centerPxY = vh * 0.5 - anchorY * pxPerWorld;
+
+  const isMobile = vw < 768;
+  const targetHeightPx = isMobile
+    ? vh * cfg.mobileHeightVh
+    : Math.max(
+        cfg.desktopMinHeightPx,
+        Math.min(cfg.desktopMaxHeightPx, vh * cfg.SHIELD_HEIGHT_VH),
+      );
+
+  const vMargin = cfg.verticalClearanceMarginPx;
+  const navBottom = options.navBottomPx ?? 56;
+  const heroBottomTop = options.heroBottomLineTopPx ?? vh - 68;
+
+  // Vertical fit between top nav bar and hero bottom line
+  const maxHeightAboveCenter = Math.max(
+    0,
+    (centerPxY - (navBottom + vMargin)) / SHIELD_ENVELOPE_HALF_HEIGHT_RATIO,
+  );
+  const maxHeightBelowCenter = Math.max(
+    0,
+    (heroBottomTop - vMargin - centerPxY) / SHIELD_ENVELOPE_HALF_HEIGHT_RATIO,
+  );
+  let maxAllowedHeightPx = Math.min(maxHeightAboveCenter, maxHeightBelowCenter);
+
+  // Horizontal viewport edge safety so the enlarged shield stays in frame
+  const edgeMargin = 12;
+  const maxHeightLeftEdge = Math.max(
+    0,
+    (centerPxX - edgeMargin) / SHIELD_ENVELOPE_HALF_WIDTH_RATIO,
+  );
+  const maxHeightRightEdge = Math.max(
+    0,
+    (vw - edgeMargin - centerPxX) / SHIELD_ENVELOPE_HALF_WIDTH_RATIO,
+  );
+  maxAllowedHeightPx = Math.min(
+    maxAllowedHeightPx,
+    maxHeightLeftEdge,
+    maxHeightRightEdge,
+  );
+
+  const computeMaxHeightClearingRect = (
+    rect: ScreenBoxRect,
+    gapPx: number,
+  ): number => {
+    const forbLeft = rect.left - gapPx;
+    const forbRight = rect.right + gapPx;
+    const forbTop = rect.top - gapPx;
+    const forbBottom = rect.bottom + gapPx;
+
+    const hClearRight =
+      centerPxX > forbRight
+        ? (centerPxX - forbRight) / SHIELD_ENVELOPE_HALF_WIDTH_RATIO
+        : 0;
+    const hClearLeft =
+      centerPxX < forbLeft
+        ? (forbLeft - centerPxX) / SHIELD_ENVELOPE_HALF_WIDTH_RATIO
+        : 0;
+    const hClearBelow =
+      centerPxY > forbBottom
+        ? (centerPxY - forbBottom) / SHIELD_ENVELOPE_HALF_HEIGHT_RATIO
+        : 0;
+    const hClearAbove =
+      centerPxY < forbTop
+        ? (forbTop - centerPxY) / SHIELD_ENVELOPE_HALF_HEIGHT_RATIO
+        : 0;
+
+    return Math.max(hClearRight, hClearLeft, hClearBelow, hClearAbove);
+  };
+
+  // Enforce >= 40px clearance gap from "VAIBHAV MARATHE" at any viewport width
+  if (
+    options.nameRect &&
+    options.nameRect.right > options.nameRect.left &&
+    options.nameRect.bottom > options.nameRect.top
+  ) {
+    maxAllowedHeightPx = Math.min(
+      maxAllowedHeightPx,
+      computeMaxHeightClearingRect(options.nameRect, cfg.nameClearanceGapPx),
+    );
+  }
+
+  // Also ensure the opaque hero text backing container never clips the shield's wireframe
+  if (
+    options.opaqueContainerRect &&
+    options.opaqueContainerRect.right > options.opaqueContainerRect.left &&
+    options.opaqueContainerRect.bottom > options.opaqueContainerRect.top
+  ) {
+    maxAllowedHeightPx = Math.min(
+      maxAllowedHeightPx,
+      computeMaxHeightClearingRect(options.opaqueContainerRect, 4),
+    );
+  }
+
+  const finalHeightPx = Math.max(0, Math.min(targetHeightPx, maxAllowedHeightPx));
+  const finalWorldHeight = (finalHeightPx / vh) * visibleWorldHeight;
+  const scale = finalWorldHeight / Math.max(0.001, cfg.worldHeight);
+
+  const halfW = finalHeightPx * SHIELD_ENVELOPE_HALF_WIDTH_RATIO;
+  const halfH = finalHeightPx * SHIELD_ENVELOPE_HALF_HEIGHT_RATIO;
+
+  return {
+    anchorX,
+    anchorY,
+    targetHeightPx,
+    finalHeightPx,
+    scale,
+    screenBox: {
+      left: centerPxX - halfW,
+      right: centerPxX + halfW,
+      top: centerPxY - halfH,
+      bottom: centerPxY + halfH,
+    },
+  };
 }
 
 
