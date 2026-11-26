@@ -338,12 +338,12 @@ export const SITE_CONFIG = {
   },
 
   timings: {
-    // First visit terminal intro duration in milliseconds (~8 seconds total)
-    firstVisitDurationMs: 8000,
+    // First visit terminal intro duration in milliseconds (~5 seconds total)
+    firstVisitDurationMs: 5000,
     // Repeat visit terminal intro duration in milliseconds (~2 seconds total)
     repeatVisitDurationMs: 2000,
     // Hard failsafe timeouts so the intro is guaranteed to end even if timers are interrupted
-    firstVisitFailsafeMs: 10000,
+    firstVisitFailsafeMs: 7000,
     repeatVisitFailsafeMs: 3000,
     // Delay after the final line before clearing the terminal and resolving the hero
     clearHoldMs: 550,

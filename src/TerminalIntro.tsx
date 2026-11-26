@@ -27,7 +27,7 @@ interface TerminalIntroProps {
  * types the lines from `src/terminalLines.ts`, clears the terminal,
  * and resolves into the hero view.
  *
- * - First visit: ~8 seconds total duration (hard failsafe at 10 seconds)
+ * - First visit: ~5 seconds total duration (hard failsafe at 7 seconds)
  * - Repeat visit: ~2 seconds total duration (hard failsafe at 3 seconds)
  * - Main effect runs strictly ONCE on mount (`[]` dependency array)
  * - Visible "Skip" button ends the intro immediately and reliably at any moment
@@ -97,7 +97,7 @@ export function TerminalIntro({
     );
     const startTime = performance.now();
 
-    // Hard failsafe: whatever else happens, end the intro after at most 10s (first visit) or 3s (repeat visit)
+    // Hard failsafe: whatever else happens, end the intro after at most 7s (first visit) or 3s (repeat visit)
     failsafeTimerIdRef.current = window.setTimeout(() => {
       finishIntroRef.current();
     }, failsafeMs);
@@ -169,7 +169,11 @@ export function TerminalIntro({
           <span className="text-[var(--accent)]">{SITE_CONFIG.identity.mark}</span>
           <span>tty0 · passive-recon</span>
           <span aria-hidden="true">·</span>
-          <span>{isRepeatVisit ? 'cached-session (2s)' : 'initial-handshake (8s)'}</span>
+          <span>
+            {isRepeatVisit
+              ? `cached-session (${Math.round(SITE_CONFIG.timings.repeatVisitDurationMs / 1000)}s)`
+              : `initial-handshake (${Math.round(SITE_CONFIG.timings.firstVisitDurationMs / 1000)}s)`}
+          </span>
         </div>
 
         <button

@@ -82,8 +82,10 @@ import { PORTFOLIO_CONTENT } from './content.js';
 test('Intro stability: ?intro=0 skips immediately, session completion is idempotent, mount counter increments once, and failsafe timings are configured', () => {
   resetIntroSessionStateForTests();
 
-  // 1. Failsafe timings: 10s on first visit, 3s on repeat visit
-  assert.equal(SITE_CONFIG.timings.firstVisitFailsafeMs, 10000);
+  // 1. Intro & failsafe timings: 5s (7s failsafe) on first visit, 2s (3s failsafe) on repeat visit
+  assert.equal(SITE_CONFIG.timings.firstVisitDurationMs, 5000);
+  assert.equal(SITE_CONFIG.timings.repeatVisitDurationMs, 2000);
+  assert.equal(SITE_CONFIG.timings.firstVisitFailsafeMs, 7000);
   assert.equal(SITE_CONFIG.timings.repeatVisitFailsafeMs, 3000);
 
   // 2. Normal first load at / does not skip
